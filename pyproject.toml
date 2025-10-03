@@ -1,0 +1,68 @@
+[build-system]
+requires = [
+    "setuptools>=70.1.0,<80.0",
+    "wheel",
+    "torch>=2.4.0",
+    "ninja",
+]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "concomtorch"
+version = "0.1.0"
+description = "GPU-accelerated connected component labeling for PyTorch tensors using Block-based Komura Equivalence (BKE)"
+readme = "README.md"
+requires-python = ">=3.10"
+license = {text = "MIT"}
+authors = [
+    {name = "Your Name", email = "your.email@example.com"}
+]
+keywords = ["pytorch", "cuda", "connected-components", "image-processing"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: C++",
+    "Topic :: Scientific/Engineering :: Image Processing",
+]
+
+dependencies = [
+    "torch>=2.4.0",
+    "numpy>=1.20.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "black>=23.0.0",
+    "ruff>=0.1.0",
+]
+
+[tool.setuptools]
+packages = ["concomtorch"]
+package-dir = {"" = "src"}
+
+[tool.setuptools.package-data]
+concomtorch = ["*.so", "*.pyd"]
+
+[tool.uv.sources]
+torch = [
+    {index = "pytorch-cuda"},
+]
+
+[[tool.uv.index]]
+name = 'pytorch-cuda'
+url = 'https://download.pytorch.org/whl/cu129'
+explicit = true
+
+[tool.black]
+line-length = 120
+target-version = ["py310", "py311", "py312"]
+
+[tool.ruff]
+line-length = 120
+target-version = "py310"

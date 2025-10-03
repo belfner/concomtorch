@@ -1,0 +1,9 @@
+global-exclude *.pyc __pycache__ *.so *.o
+prune .venv
+prune venv
+prune build
+prune dist
+prune wheelhouse
+prune .git
+prune .pytest_cache
+prune *.egg-info
