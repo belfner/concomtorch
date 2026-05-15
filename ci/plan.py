@@ -26,7 +26,7 @@ from detect import (
 )
 
 WHEEL_RE = re.compile(
-    r'^(?P<name>[^-]+)-(?P<version>[^+]+)\+(?P<local>[^-]+)-(?P<py>cp\d+)-(?P=py)-(?P<plat>[^.]+)\.whl$'
+    r'^(?P<name>[^-]+)-(?P<version>[^+]+)\+(?P<local>[^-]+)-(?P<py>cp\d+)-(?P=py)-(?P<plat>.+)\.whl$'
 )
 LOCAL_RE = re.compile(r'^(?P<cuda>cu\d+)torch(?P<torch>\d+\.\d+)$')
 

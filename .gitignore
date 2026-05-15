@@ -32,3 +32,6 @@ htmlcov/
 Thumbs.db
 /wheelhouse/
 *.pdf
+
+# Local secrets (e.g. GH_TOKEN consumed by ci/release.py)
+.env

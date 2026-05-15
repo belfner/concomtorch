@@ -39,8 +39,9 @@ from plan import (
 from publish import (
     collect,
     move_new_wheels,
-    write_root_index,
-    write_torch_cuda_page,
+    write_channel_project_page,
+    write_channel_root,
+    write_landing,
 )
 
 CI_DIR = Path(__file__).resolve().parent
@@ -66,14 +67,15 @@ def build_one(torch_version: str, cuda_variant: str, py_abis: list[str], output_
 
 def publish(output_dir: Path, serve_root: Path) -> None:
     """
-    Move any wheels in output_dir into serve_root and regenerate indexes.
+    Move any wheels in output_dir into serve_root and regenerate per-cuda PEP 503 indexes.
     """
     moved = move_new_wheels(output_dir, serve_root / 'files')
     print(f'Moved {len(moved)} wheels into {serve_root / "files"}', flush=True)
     groups = collect(serve_root)
-    for (torch_minor, cuda), wheels in groups.items():
-        write_torch_cuda_page(serve_root, torch_minor, cuda, wheels)
-    write_root_index(serve_root, groups)
+    for cuda, wheels in groups.items():
+        write_channel_project_page(serve_root, cuda, wheels)
+        write_channel_root(serve_root, cuda)
+    write_landing(serve_root, list(groups.keys()))
 
 
 def main() -> int:
@@ -89,6 +91,15 @@ def main() -> int:
                         help='Assume images exist; skip parallel docker build phase.')
     parser.add_argument('--skip-eviction', action='store_true',
                         help='Skip LRU eviction at the end of the tick.')
+    parser.add_argument('--publish-mode', choices=['local', 'github-pages'], default='github-pages',
+                        help='local: move wheels to <serve-root>/files and regenerate HTML there '
+                             'after each build. github-pages: leave wheels in the wheelhouse and '
+                             'run ci/release.py once at the end of the tick to upload to GitHub '
+                             'Releases and push the index to the gh-pages branch.')
+    parser.add_argument('--release-tag-prefix', default='wheels',
+                        help='Prefix for per-(cuda, torch_minor) GitHub Release tags used by '
+                             "publish-mode=github-pages. Each combination gets a release named "
+                             "'<prefix>-<cuda>-torch<minor>'.")
     args = parser.parse_args()
 
     started = time.monotonic()
@@ -140,7 +151,20 @@ def main() -> int:
             failures.append((torch, cuda))
             print(f'  ! build failed for {torch} / {cuda}', flush=True)
             continue
-        publish(args.wheelhouse, args.serve_root)
+        if args.publish_mode == 'local':
+            publish(args.wheelhouse, args.serve_root)
+
+    if args.publish_mode == 'github-pages' and len(groups) != len(failures):
+        release_cmd = [
+            sys.executable, str(CI_DIR / 'release.py'),
+            '--wheelhouse', str(args.wheelhouse),
+            '--tag-prefix', args.release_tag_prefix,
+        ]
+        print('>>', ' '.join(release_cmd), flush=True)
+        release_result = subprocess.run(release_cmd)
+        if release_result.returncode != 0:
+            failures.append(('release', 'gh-pages'))
+            print('  ! release step failed', flush=True)
 
     if not args.skip_eviction:
         evicted = evict_lru(max_resident, keep=set(active_cuda))
