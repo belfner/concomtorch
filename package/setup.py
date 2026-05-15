@@ -28,6 +28,30 @@ def build_local_version_suffix() -> str:
     return f'+{cuda}torch{torch_ver}'
 
 
+def build_install_requires() -> list[str]:
+    """
+    Compose the runtime install_requires list.
+
+    When CONCOMTORCH_TORCH is set (the CI wheel build path), pin the torch dependency to the
+    matching minor with ``torch==X.Y.*`` so a single built wheel satisfies any patch release
+    of that minor. The env var carries the full build-time patch (e.g. ``2.6.1``); the minor
+    is derived here and used for the dependency pin, while the full patch appears in the
+    wheel's PEP 440 local version segment via :func:`build_local_version_suffix`. When unset
+    (a local source build), leave torch unpinned so the existing environment satisfies the
+    dependency.
+    """
+    torch_ver = os.environ.get('CONCOMTORCH_TORCH', '').strip()
+    if torch_ver == '':
+        return ['torch']
+    parts = torch_ver.split('.')
+    if len(parts) < 2:
+        raise RuntimeError(
+            f"CONCOMTORCH_TORCH must look like 'X.Y' or 'X.Y.Z', got {torch_ver!r}"
+        )
+    minor = f'{parts[0]}.{parts[1]}'
+    return [f'torch=={minor}.*']
+
+
 def make_cuda_extension():
     """
     Build the CUDAExtension descriptor.
@@ -82,6 +106,7 @@ if len(ext_modules) > 0:
 setup(
     name='concomtorch',
     version='0.1.0' + build_local_version_suffix(),
+    install_requires=build_install_requires(),
     ext_modules=ext_modules,
     cmdclass=cmdclass,
 )

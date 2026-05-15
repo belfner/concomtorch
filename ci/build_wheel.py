@@ -47,16 +47,6 @@ def compute_cibw_build_pattern(py_abis: list[str]) -> str:
     return ' '.join(f'{abi}-manylinux_x86_64' for abi in normalize_abis(py_abis))
 
 
-def torch_minor(version: str) -> str:
-    """
-    Extract the MAJOR.MINOR portion of a torch version string.
-    """
-    parts = version.split('.')
-    if len(parts) < 2:
-        raise ValueError(f'Unexpected torch version: {version!r}')
-    return f'{parts[0]}.{parts[1]}'
-
-
 def run(cmd: list[str], *, env: dict | None = None) -> None:
     print('>>', ' '.join(shlex.quote(c) for c in cmd), flush=True)
     subprocess.check_call(cmd, env=env)
@@ -102,8 +92,6 @@ def main() -> int:
             )
             return 2
 
-    torch_mm = torch_minor(args.torch_version)
-
     cibw_env = os.environ.copy()
     cibw_env.update({
         'CIBW_MANYLINUX_X86_64_IMAGE': tag,
@@ -134,7 +122,7 @@ def main() -> int:
             f'CUDA_HOME=/usr/local/cuda-{cuda_major_minor} '
             f'LD_LIBRARY_PATH=/usr/local/cuda-{cuda_major_minor}/lib64:$LD_LIBRARY_PATH '
             f'CONCOMTORCH_CUDA={args.cuda_variant} '
-            f'CONCOMTORCH_TORCH={torch_mm} '
+            f'CONCOMTORCH_TORCH={args.torch_version} '
             'AUDITWHEEL_PLAT="manylinux_2_28_x86_64"'
         ),
         'CIBW_BUILD_VERBOSITY': '2',
