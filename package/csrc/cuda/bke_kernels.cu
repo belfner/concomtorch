@@ -56,10 +56,13 @@ __device__ __forceinline__ uint8_t read_info_byte(
         // Odd width, last column: stored in bottom-left pixel
         return static_cast<uint8_t>(labels[xL + step_L]);
     }
-    // TODO Handle edge case
-    // Edge case: single-pixel block at bottom-right corner
-    // This would need separate storage, but is extremely rare
-    return 0;
+    // Single-pixel block at the bottom-right corner (odd height AND odd
+    // width): no spare cell exists to store the info byte. Its only pixel
+    // is the block's top-left pixel, foreground iff the intermediate parent
+    // is not the background sentinel. The corner's only predecessor pixels
+    // (above, left, up-left) are mutually 8-adjacent, so the corner needs
+    // no deferred-union slot of its own, only this foreground bit.
+    return labels[xL] >= 0 ? static_cast<uint8_t>(1) : static_cast<uint8_t>(0);
 }
 
 __device__ void atomic_union(int32_t* labels, int32_t index_a, int32_t index_b) {
@@ -161,8 +164,9 @@ __global__ void bke_init_kernel(
     // Check if this block has any foreground pixels
     if ((info_byte & 0x0F) == 0) {
         labels[xL] = kBackgroundParent;  // Background block
-        // TODO unsure about this part
-        // Store info_byte byte
+        // Zero the info cell wherever it lives. The block bottom-right cell
+        // is written only in final labeling and is never read before then,
+        // so it needs no initialization here.
         if (x + 1 < width) {
             labels[xL + 1] = 0;
         } else if (y + 1 < height) {
@@ -244,9 +248,9 @@ __global__ void bke_init_kernel(
         // Odd width, last column: store in bottom-left pixel
         labels[xL + step_L] = static_cast<int32_t>(info_byte);
     }
-    // If this is the very last block (1x1 at bottom-right corner of odd-sized image),
-    // we'd need separate storage, but this is a rare edge case
-    // Todo handle this edge case
+    // A 1x1 bottom-right block (odd height AND odd width) has no spare cell
+    // for the info byte; read_info_byte derives its single foreground bit
+    // from the sign of labels[xL] instead, so no storage is needed here.
 }
 
 // ============================================================================
