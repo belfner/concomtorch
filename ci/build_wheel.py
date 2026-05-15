@@ -24,6 +24,13 @@ from docker_pool import (
     list_resident,
 )
 
+# cibuildwheel resolves test-sources against its own process working directory
+# (cibuildwheel/platforms/linux.py passes Path.cwd() into copy_test_sources),
+# not --project-dir. The real cibuildwheel subprocess and the preflight query
+# are launched with cwd=REPO_ROOT so CIBW_TEST_SOURCES_LINUX=tests deterministically
+# copies the repo-root tests/ directory regardless of where this script is invoked.
+REPO_ROOT = Path(__file__).resolve().parent.parent
+
 
 def normalize_abi(tag: str) -> str:
     """
@@ -48,15 +55,16 @@ def compute_cibw_build_pattern(py_abis: list[str]) -> str:
     return ' '.join(f'{abi}-manylinux_x86_64' for abi in normalize_abis(py_abis))
 
 
-def run(cmd: list[str], *, env: dict | None = None) -> None:
+def run(cmd: list[str], *, env: dict | None = None, cwd: Path | None = None) -> None:
     print('>>', ' '.join(shlex.quote(c) for c in cmd), flush=True)
-    subprocess.check_call(cmd, env=env)
+    subprocess.check_call(cmd, env=env, cwd=cwd)
 
 
 def preflight_buildable(
     project_dir: Path,
     py_abis: list[str],
     env: dict,
+    cwd: Path | None = None,
 ) -> list[str]:
     """
     Ask cibuildwheel which build identifiers it would emit and report missing ABIs.
@@ -75,6 +83,10 @@ def preflight_buildable(
         Requested CPython ABI tags (any accepted form, e.g. 'cp310', '310').
     env : dict
         The fully composed CIBW environment used for the real build.
+    cwd : Path, optional
+        Working directory for the cibuildwheel subprocess, by default None.
+        Must match the cwd of the real build so the preflight query reflects
+        the same test-sources resolution.
 
     Returns
     -------
@@ -88,6 +100,7 @@ def preflight_buildable(
         check=True,
         capture_output=True,
         text=True,
+        cwd=cwd,
     )
     identifiers = result.stdout.split()
     missing = [
@@ -114,6 +127,12 @@ def parse_args() -> argparse.Namespace:
                    help='Directory on the host to receive built wheels.')
     p.add_argument('--ensure-image', action='store_true',
                    help='Build the docker image if missing (default: error out instead).')
+    p.add_argument('--skip-tests', dest='skip_tests', action='store_true',
+                   help='Omit the in-container pytest gate and GPU passthrough, for a '
+                        'deliberate GPU-less local build. Refused unless --output-dir is '
+                        'an explicitly non-"wheelhouse" scratch directory: a skipped-test '
+                        'wheel is unverified and must never be indistinguishable from a '
+                        'verified artifact. Not exposed via ci/run.py.')
     return p.parse_args()
 
 
@@ -123,6 +142,17 @@ def main() -> int:
 
     project_dir = Path(args.project_dir).resolve()
     output_dir = Path(args.output_dir).resolve()
+
+    if args.skip_tests and output_dir.name == 'wheelhouse':
+        print(
+            '--skip-tests refuses to write into a "wheelhouse" directory. A '
+            'skipped-test wheel is unverified; pass --output-dir to an explicit '
+            'scratch directory (e.g. scratch-wheelhouse) so it cannot be mistaken '
+            'for a verified artifact or picked up by the publish path.',
+            file=sys.stderr,
+        )
+        return 2
+
     output_dir.mkdir(parents=True, exist_ok=True)
 
     tag = image_tag(args.cuda_variant)
@@ -174,10 +204,52 @@ def main() -> int:
             'AUDITWHEEL_PLAT="manylinux_2_28_x86_64"'
         ),
         'CIBW_BUILD_VERBOSITY': '2',
-        'CIBW_CONTAINER_ENGINE': 'docker; create_args: -v concomtorch-pip-cache:/root/.cache/pip',
     })
 
-    missing = preflight_buildable(project_dir, args.py_abis, cibw_env)
+    pip_cache_mount = '-v concomtorch-pip-cache:/root/.cache/pip'
+    if args.skip_tests:
+        # GPU-less local build: no test gate, no GPU passthrough so the
+        # container can be created on a host without the NVIDIA runtime.
+        cibw_env['CIBW_CONTAINER_ENGINE'] = f'docker; create_args: {pip_cache_mount}'
+    else:
+        # The build, repair, and test steps reuse one container created from
+        # these create_args, so --gpus=all is what gives the cibuildwheel test
+        # step GPU visibility for the CUDA-only kernels. The single-token
+        # --gpus=all form avoids create_args token-pair splitting.
+        cibw_env['CIBW_CONTAINER_ENGINE'] = (
+            f'docker; create_args: --gpus=all {pip_cache_mount}'
+        )
+        cibw_env.update({
+            # Runs in the fresh test venv before the wheel install. The wheel
+            # pins torch==X.Y.* (setup.py); PyPI does not carry the +cuXXX
+            # local-version build, so install the matching CUDA torch from the
+            # pytorch channel here. cibuildwheel does not pass --upgrade on the
+            # subsequent repaired-wheel install, so this torch is kept.
+            'CIBW_BEFORE_TEST_LINUX': (
+                f'python -m pip install "torch=={args.torch_version}+{args.cuda_variant}" '
+                f'--index-url https://download.pytorch.org/whl/{args.cuda_variant}/'
+            ),
+            # Runs from cibuildwheel's temporary test cwd against the copied
+            # tests/ tree (see CIBW_TEST_SOURCES_LINUX), not the source tree.
+            'CIBW_TEST_COMMAND_LINUX': 'python -m pytest -v tests',
+            # Copied into the temporary test cwd. Resolves against the
+            # cibuildwheel process cwd, which is pinned to REPO_ROOT below.
+            'CIBW_TEST_SOURCES_LINUX': 'tests',
+            # Installs the repaired wheel as concomtorch[test]; the test extra
+            # is declared in package/pyproject.toml. torch is deliberately not
+            # in that extra (handled by CIBW_BEFORE_TEST_LINUX above).
+            'CIBW_TEST_EXTRAS_LINUX': 'test',
+            # conftest.py hard-fails when CONCOMTORCH_REQUIRE_GPU=1 and CUDA is
+            # unavailable, so a mis-provisioned runner cannot silently pass the
+            # gate with zero GPU tests.
+            'CIBW_TEST_ENVIRONMENT_LINUX': (
+                f'CONCOMTORCH_REQUIRE_GPU=1 '
+                f'CONCOMTORCH_EXPECTED_CUDA={args.cuda_variant} '
+                f'CONCOMTORCH_EXPECTED_TORCH={args.torch_version}'
+            ),
+        })
+
+    missing = preflight_buildable(project_dir, args.py_abis, cibw_env, cwd=REPO_ROOT)
     if len(missing) > 0:
         cibw_version = importlib.metadata.version('cibuildwheel')
         print(
@@ -193,6 +265,7 @@ def main() -> int:
         [sys.executable, '-m', 'cibuildwheel', '--platform', 'linux',
          '--output-dir', str(output_dir), str(project_dir)],
         env=cibw_env,
+        cwd=REPO_ROOT,
     )
 
     print('\nWheels written to:', output_dir, flush=True)

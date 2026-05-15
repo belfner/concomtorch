@@ -211,7 +211,7 @@ def main() -> int:
             ok = build_one(torch, cuda, pys, args.wheelhouse, compute_min)
             if not ok:
                 failures.append((torch, cuda))
-                print(f'  ! build failed for {torch} / {cuda}', flush=True)
+                print(f'  ! build/test failed for {torch} / {cuda}', flush=True)
                 continue
             if args.publish_mode == 'local':
                 publish(args.wheelhouse, args.serve_root)

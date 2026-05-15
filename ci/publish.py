@@ -396,6 +396,11 @@ def move_new_wheels(source: Path, dest_files: Path) -> list[Path]:
         return []
     dest_files.mkdir(parents=True, exist_ok=True)
     moved = []
+    # Every wheel reaching `source` has already passed the in-container pytest
+    # gate: cibuildwheel runs CIBW_TEST_COMMAND_LINUX after auditwheel-repair and
+    # before moving the wheel to /output and copying it back to the host, so a
+    # failing suite aborts the build before the wheel can land here. Verification
+    # is upstream by construction; this mover must not add a second gate.
     for wheel in source.glob('*.whl'):
         target = dest_files / wheel.name
         shutil.move(str(wheel), str(target))

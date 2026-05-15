@@ -46,10 +46,9 @@ def connected_components(
         Foreground pixels should have non-zero values. Must be on CUDA device.
 
     labels : torch.Tensor, optional
-        Pre-allocated, contiguous int32 CUDA tensor of shape (H, W).
+        Pre-allocated int32 CUDA tensor of shape (H, W).
         If provided, avoids allocation overhead (~4-9% faster for repeated
-        calls with same image size). The tensor is modified in-place; a
-        non-contiguous buffer is rejected rather than silently replaced.
+        calls with same image size). The tensor will be modified in-place.
 
     algorithm : str, default='bke_ic'
         Which algorithm variant to use:
