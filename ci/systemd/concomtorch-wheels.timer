@@ -1,0 +1,12 @@
+[Unit]
+Description=Daily concomtorch wheel build tick
+Requires=concomtorch-wheels.service
+
+[Timer]
+OnCalendar=daily
+RandomizedDelaySec=3h
+Persistent=true
+Unit=concomtorch-wheels.service
+
+[Install]
+WantedBy=timers.target

@@ -42,6 +42,13 @@ dev = [
     "ruff>=0.1.0",
 ]
 
+[dependency-groups]
+build = [
+    "torch-wheel-index>=0.2.0",
+    "pyyaml>=6.0",
+    "cibuildwheel>=2.21.0",
+]
+
 [tool.setuptools]
 packages = ["concomtorch"]
 package-dir = {"" = "src"}

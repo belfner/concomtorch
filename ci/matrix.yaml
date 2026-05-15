@@ -1,0 +1,32 @@
+# Build matrix for concomtorch wheels.
+#
+# Hand-curated cross product of (torch_version x cuda_variant x python_abi).
+# ci/detect.py intersects this with what PyTorch actually publishes on
+# download.pytorch.org via torch-wheel-index, then ci/plan.py diffs against
+# the on-disk wheelhouse to decide what to build.
+
+torch_min: '2.4.0'
+
+python_abis:
+  - cp310
+  - cp311
+  - cp312
+  - cp313
+
+cuda_variants:
+  - cu121
+  - cu124
+  - cu126
+  - cu128
+  - cu129
+  - cu130
+
+# Exclusions express "this (torch, cuda) pair is invalid / unavailable / unwanted".
+# torch_min applies when torch >= the given value; torch_max applies when torch <= the given value.
+exclude:
+  - {cuda: cu121, torch_min: '2.7.0'}
+  - {cuda: cu124, torch_min: '2.8.0'}
+  - {cuda: cu126, torch_max: '2.5.999'}
+  - {cuda: cu128, torch_max: '2.6.999'}
+  - {cuda: cu129, torch_max: '2.7.999'}
+  - {cuda: cu130, torch_max: '2.8.999'}

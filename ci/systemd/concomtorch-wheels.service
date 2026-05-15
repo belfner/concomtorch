@@ -1,0 +1,30 @@
+[Unit]
+Description=concomtorch wheel build tick
+Wants=network-online.target docker.service
+After=network-online.target docker.service
+
+[Service]
+Type=oneshot
+WorkingDirectory=/srv/concomtorch
+Environment=PATH=/srv/concomtorch/.venv/bin:/usr/local/bin:/usr/bin:/bin
+# Optional: set this to your ntfy.sh topic URL for failure alerts.
+# Environment=CONCOMTORCH_NTFY_URL=https://ntfy.sh/<your-topic>
+ExecStart=/srv/concomtorch/.venv/bin/python /srv/concomtorch/ci/run.py
+TimeoutStartSec=12h
+Nice=10
+IOSchedulingClass=best-effort
+IOSchedulingPriority=5
+
+# Run as a non-root user that is in the `docker` group on the host.
+User=concomtorch
+Group=concomtorch
+
+# Filesystem confinement.
+ProtectSystem=strict
+ProtectHome=yes
+ReadWritePaths=/srv/concomtorch /var/www/wheels
+PrivateTmp=yes
+NoNewPrivileges=yes
+
+[Install]
+WantedBy=multi-user.target
