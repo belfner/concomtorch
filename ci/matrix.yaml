@@ -5,7 +5,7 @@
 # download.pytorch.org via torch-wheel-index, then ci/plan.py diffs against
 # the on-disk wheelhouse to decide what to build.
 
-torch_min: '2.4.0'
+torch_min: '2.6.0'
 
 # Docker image pool tuning.
 # max_parallel_builds caps concurrent `docker build` invocations during warmup.
