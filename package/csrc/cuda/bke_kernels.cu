@@ -2,12 +2,19 @@
 #include <ATen/ATen.h>
 #include <cuda_runtime.h>
 #include <cstdint>
+#include <limits>
 
 // ============================================================================
 // Block-based Komura Equivalence (BKE) Implementation
 // Based on: "Optimized Block-Based Algorithms to Label Connected Components
 // on GPUs" (IEEE TPDS 2019)
 // ============================================================================
+
+// Background sentinel for the intermediate union-find phase. Block ids are
+// non-negative raster indices (the top-left block has id 0), so 0 is a valid
+// foreground root and cannot also mean background. A negative sentinel keeps
+// background distinguishable from every block id.
+constexpr int32_t kBackgroundParent = -1;
 
 // Union-Find helper functions (from paper Algorithm 1)
 
@@ -50,10 +57,13 @@ __device__ __forceinline__ uint8_t read_info_byte(
         // Odd width, last column: stored in bottom-left pixel
         return static_cast<uint8_t>(labels[xL + step_L]);
     }
-    // TODO Handle edge case
-    // Edge case: single-pixel block at bottom-right corner
-    // This would need separate storage, but is extremely rare
-    return 0;
+    // Single-pixel block at the bottom-right corner (odd height AND odd
+    // width): no spare cell exists to store the info byte. Its only pixel
+    // is the block's top-left pixel, foreground iff the intermediate parent
+    // is not the background sentinel. The corner's only predecessor pixels
+    // (above, left, up-left) are mutually 8-adjacent, so the corner needs
+    // no deferred-union slot of its own, only this foreground bit.
+    return labels[xL] >= 0 ? static_cast<uint8_t>(1) : static_cast<uint8_t>(0);
 }
 
 __device__ void atomic_union(int32_t* labels, int32_t index_a, int32_t index_b) {
@@ -154,9 +164,10 @@ __global__ void bke_init_kernel(
     // If this block has no foreground pixels, just initialize and return
     // Check if this block has any foreground pixels
     if ((info_byte & 0x0F) == 0) {
-        labels[xL] = 0;  // Background block
-        // TODO unsure about this part
-        // Store info_byte byte
+        labels[xL] = kBackgroundParent;  // Background block
+        // Zero the info cell wherever it lives. The block bottom-right cell
+        // is written only in final labeling and is never read before then,
+        // so it needs no initialization here.
         if (x + 1 < width) {
             labels[xL + 1] = 0;
         } else if (y + 1 < height) {
@@ -238,9 +249,9 @@ __global__ void bke_init_kernel(
         // Odd width, last column: store in bottom-left pixel
         labels[xL + step_L] = static_cast<int32_t>(info_byte);
     }
-    // If this is the very last block (1x1 at bottom-right corner of odd-sized image),
-    // we'd need separate storage, but this is a rare edge case
-    // Todo handle this edge case
+    // A 1x1 bottom-right block (odd height AND odd width) has no spare cell
+    // for the info byte; read_info_byte derives its single foreground bit
+    // from the sign of labels[xL] instead, so no storage is needed here.
 }
 
 // ============================================================================
@@ -268,8 +279,8 @@ __global__ void bke_compress_kernel(
     const int64_t x = bx * 2;  // Top-left pixel col of this block
     const int64_t xL = y * step_L + x;  // Labels image index
 
-    // Skip background blocks (label 0)
-    if (labels[xL] == 0) return;
+    // Skip background blocks (negative sentinel; 0 is a valid block id)
+    if (labels[xL] < 0) return;
 
     // Compress the path to root (updates labels[xL] to point directly to root)
     if (use_inline_compress) {
@@ -306,8 +317,8 @@ __global__ void bke_reduction_kernel(
     // Read the current block's label
     int32_t block_label = labels[xL];
 
-    // Skip background blocks
-    if (block_label == 0) return;
+    // Skip background blocks (negative sentinel; 0 is a valid block id)
+    if (block_label < 0) return;
 
     // Read the information byte
     uint8_t info_byte = read_info_byte(labels, xL, x, y, width, height, step_L);
@@ -365,8 +376,10 @@ __global__ void bke_final_labeling_kernel(
     // Read the information byte
     uint8_t info_byte = read_info_byte(labels, xL, x, y, width, height, step_L);
 
-    // If no foreground pixels in this block, set all to 0
-    if ((info_byte & 0x0F) == 0 || block_label == 0) {
+    // If no foreground pixels in this block, set all to 0. A background block
+    // has an all-zero info byte, so this also catches the kBackgroundParent
+    // sentinel without a separate label check.
+    if ((info_byte & 0x0F) == 0) {
         labels[xL] = 0;
         if (x + 1 < width) {
             labels[xL + 1] = 0;
@@ -441,6 +454,11 @@ torch::Tensor bke_cuda_forward(
     int64_t height = input_cont.size(0);
     int64_t width = input_cont.size(1);
 
+    // Block ids and final labels are int32. Reject inputs whose pixel count
+    // cannot be represented before any narrowing happens.
+    TORCH_CHECK(height == 0 || width <= std::numeric_limits<int32_t>::max() / height,
+                "Input too large for int32 BKE labels (height * width must be < 2^31)");
+
     // Allocate or validate labels tensor
     if (!labels.defined() || labels.numel() == 0) {
         labels = torch::empty({height, width},
@@ -450,7 +468,15 @@ torch::Tensor bke_cuda_forward(
         TORCH_CHECK(labels.dtype() == torch::kInt32, "Labels must be int32");
         TORCH_CHECK(labels.dim() == 2 && labels.size(0) == height && labels.size(1) == width,
                    "Labels shape mismatch");
-        labels = labels.contiguous();
+        TORCH_CHECK(labels.is_contiguous(),
+                   "Preallocated labels buffer must be contiguous "
+                   "(it is written in place)");
+    }
+
+    // Empty image: nothing to label. Returning here avoids a zero-sized
+    // CUDA grid (an invalid launch configuration).
+    if (height == 0 || width == 0) {
+        return labels;
     }
 
     const int64_t step_I = width;  // Contiguous row-major storage
@@ -470,7 +496,7 @@ torch::Tensor bke_cuda_forward(
     // BKE Algorithm: 5 kernels following the paper
 
     // Kernel 1: Initialization (build BitSet, link to minimum neighbor, mark deferred unions)
-    AT_DISPATCH_INTEGRAL_TYPES(input_cont.scalar_type(), "bke_init_kernel", [&] {
+    AT_DISPATCH_INTEGRAL_TYPES_AND(at::ScalarType::Bool, input_cont.scalar_type(), "bke_init_kernel", [&] {
         bke_init_kernel<scalar_t><<<blocks, threads>>>(
             input_cont.data_ptr<scalar_t>(),
             labels.data_ptr<int32_t>(),
@@ -614,8 +640,7 @@ torch::Tensor get_component_masks_cuda(
     torch::Tensor unique_labels_gpu;
 
     // If unique_labels provided, use directly; otherwise compute
-    if (unique_labels_opt.has_value() && unique_labels_opt.value().defined() &&
-        unique_labels_opt.value().numel() > 0) {
+    if (unique_labels_opt.has_value() && unique_labels_opt.value().defined()) {
 
         auto unique_labels_tensor = unique_labels_opt.value();
 
@@ -635,6 +660,13 @@ torch::Tensor get_component_masks_cuda(
     // Handle empty case
     if (num_components == 0) {
         return torch::empty({0, height, width},
+            torch::TensorOptions().dtype(torch::kUInt8).device(labels_cont.device()));
+    }
+
+    // Empty label map with caller-supplied components: return correctly
+    // shaped all-zero masks without launching a zero-sized grid.
+    if (num_pixels == 0) {
+        return torch::zeros({num_components, height, width},
             torch::TensorOptions().dtype(torch::kUInt8).device(labels_cont.device()));
     }
 

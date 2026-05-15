@@ -46,6 +46,7 @@ test = [
     "pytest>=8",
     "numpy>=1.26",
     "scipy>=1.11",
+    "connected-components-3d>=3.12",
 ]
 
 [tool.setuptools]

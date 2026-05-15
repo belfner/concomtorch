@@ -69,16 +69,33 @@ def pytest_configure(config: pytest.Config) -> None:
         )
 
 
+def pytest_addoption(parser: pytest.Parser) -> None:
+    """
+    Register the ``--run-slow`` opt-in for the scale/stress suite.
+
+    Parameters
+    ----------
+    parser : pytest.Parser
+        The pytest command-line parser.
+    """
+    parser.addoption(
+        "--run-slow",
+        action="store_true",
+        default=False,
+        help="run tests marked slow (large/odd images, atomic-union stress)",
+    )
+
+
 def pytest_collection_modifyitems(
     config: pytest.Config,
     items: list[pytest.Item],
 ) -> None:
     """
-    Skip GPU-marked tests on a GPU-less local run.
+    Deselect slow tests unless opted in, then skip GPU tests locally.
 
-    Only reached when a GPU is not required (a required-but-absent GPU already
-    aborted in pytest_configure), so skipping here is safe for local
-    development.
+    Slow handling is independent of CUDA. The GPU skip is only reached
+    when a GPU is not required (a required-but-absent GPU already aborted
+    in pytest_configure), so skipping here is safe for local development.
 
     Parameters
     ----------
@@ -87,6 +104,12 @@ def pytest_collection_modifyitems(
     items : list[pytest.Item]
         Collected test items, modified in place.
     """
+    if not config.getoption("--run-slow"):
+        skip_slow = pytest.mark.skip(reason="slow test; pass --run-slow to enable")
+        for item in items:
+            if "slow" in item.keywords:
+                item.add_marker(skip_slow)
+
     if _cuda_available():
         return
     skip_gpu = pytest.mark.skip(reason="no CUDA device; set CONCOMTORCH_REQUIRE_GPU=1 to make this a hard failure")
