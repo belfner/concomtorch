@@ -2,6 +2,7 @@
 #include <ATen/ATen.h>
 #include <cuda_runtime.h>
 #include <cstdint>
+#include <limits>
 
 // ============================================================================
 // Block-based Komura Equivalence (BKE) Implementation
@@ -453,6 +454,11 @@ torch::Tensor bke_cuda_forward(
     int64_t height = input_cont.size(0);
     int64_t width = input_cont.size(1);
 
+    // Block ids and final labels are int32. Reject inputs whose pixel count
+    // cannot be represented before any narrowing happens.
+    TORCH_CHECK(height == 0 || width <= std::numeric_limits<int32_t>::max() / height,
+                "Input too large for int32 BKE labels (height * width must be < 2^31)");
+
     // Allocate or validate labels tensor
     if (!labels.defined() || labels.numel() == 0) {
         labels = torch::empty({height, width},
@@ -462,7 +468,9 @@ torch::Tensor bke_cuda_forward(
         TORCH_CHECK(labels.dtype() == torch::kInt32, "Labels must be int32");
         TORCH_CHECK(labels.dim() == 2 && labels.size(0) == height && labels.size(1) == width,
                    "Labels shape mismatch");
-        labels = labels.contiguous();
+        TORCH_CHECK(labels.is_contiguous(),
+                   "Preallocated labels buffer must be contiguous "
+                   "(it is written in place)");
     }
 
     // Empty image: nothing to label. Returning here avoids a zero-sized
@@ -632,8 +640,7 @@ torch::Tensor get_component_masks_cuda(
     torch::Tensor unique_labels_gpu;
 
     // If unique_labels provided, use directly; otherwise compute
-    if (unique_labels_opt.has_value() && unique_labels_opt.value().defined() &&
-        unique_labels_opt.value().numel() > 0) {
+    if (unique_labels_opt.has_value() && unique_labels_opt.value().defined()) {
 
         auto unique_labels_tensor = unique_labels_opt.value();
 
