@@ -9,6 +9,12 @@
 // on GPUs" (IEEE TPDS 2019)
 // ============================================================================
 
+// Background sentinel for the intermediate union-find phase. Block ids are
+// non-negative raster indices (the top-left block has id 0), so 0 is a valid
+// foreground root and cannot also mean background. A negative sentinel keeps
+// background distinguishable from every block id.
+constexpr int32_t kBackgroundParent = -1;
+
 // Union-Find helper functions (from paper Algorithm 1)
 
 __device__ __forceinline__ int32_t find(int32_t* labels, int32_t index) {
@@ -154,7 +160,7 @@ __global__ void bke_init_kernel(
     // If this block has no foreground pixels, just initialize and return
     // Check if this block has any foreground pixels
     if ((info_byte & 0x0F) == 0) {
-        labels[xL] = 0;  // Background block
+        labels[xL] = kBackgroundParent;  // Background block
         // TODO unsure about this part
         // Store info_byte byte
         if (x + 1 < width) {
@@ -268,8 +274,8 @@ __global__ void bke_compress_kernel(
     const int64_t x = bx * 2;  // Top-left pixel col of this block
     const int64_t xL = y * step_L + x;  // Labels image index
 
-    // Skip background blocks (label 0)
-    if (labels[xL] == 0) return;
+    // Skip background blocks (negative sentinel; 0 is a valid block id)
+    if (labels[xL] < 0) return;
 
     // Compress the path to root (updates labels[xL] to point directly to root)
     if (use_inline_compress) {
@@ -306,8 +312,8 @@ __global__ void bke_reduction_kernel(
     // Read the current block's label
     int32_t block_label = labels[xL];
 
-    // Skip background blocks
-    if (block_label == 0) return;
+    // Skip background blocks (negative sentinel; 0 is a valid block id)
+    if (block_label < 0) return;
 
     // Read the information byte
     uint8_t info_byte = read_info_byte(labels, xL, x, y, width, height, step_L);
@@ -365,8 +371,10 @@ __global__ void bke_final_labeling_kernel(
     // Read the information byte
     uint8_t info_byte = read_info_byte(labels, xL, x, y, width, height, step_L);
 
-    // If no foreground pixels in this block, set all to 0
-    if ((info_byte & 0x0F) == 0 || block_label == 0) {
+    // If no foreground pixels in this block, set all to 0. A background block
+    // has an all-zero info byte, so this also catches the kBackgroundParent
+    // sentinel without a separate label check.
+    if ((info_byte & 0x0F) == 0) {
         labels[xL] = 0;
         if (x + 1 < width) {
             labels[xL + 1] = 0;
