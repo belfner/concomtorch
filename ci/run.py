@@ -56,7 +56,7 @@ def build_one(torch_version: str, cuda_variant: str, py_abis: list[str], output_
         '--torch', torch_version,
         '--cuda', cuda_variant,
         '--py', *py_abis,
-        '--project-dir', str(REPO_ROOT),
+        '--project-dir', str(REPO_ROOT / 'package'),
         '--output-dir', str(output_dir),
     ]
     print('>>', ' '.join(cmd), flush=True)

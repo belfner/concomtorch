@@ -2,8 +2,11 @@
 
 Self-hosted wheel build automation. Lives on one server, runs once a day, builds any
 (torch, cuda, py) combination that PyTorch publishes which is in `matrix.yaml` and not yet in the
-wheelhouse. Wheels are served as PEP 440 local versions (`+cu121torch2.4`) from a static HTML
-index that pip consumes via `--extra-index-url` or `--find-links`.
+wheelhouse. Wheels carry PEP 440 local versions (`+cu121torch2.4`) and are published behind
+per-cuda PEP 503 simple indexes (one channel per cuda variant, mirroring PyTorch's
+`download.pytorch.org/whl/cu121` layout) that pip consumes via `--extra-index-url`. The torch
+minor pin lives in each wheel's `Requires-Dist`, so pip auto-selects the right wheel for the
+user's installed torch.
 
 ## Files
 
@@ -14,7 +17,7 @@ index that pip consumes via `--extra-index-url` or `--find-links`.
 | `plan.py` | Diff WANTED against wheelhouse contents, emit build plan grouped by (torch, cuda) |
 | `docker_pool.py` | List, build (parallel), and LRU-evict the manylinux+CUDA image cache |
 | `build_wheel.py` | Run cibuildwheel against a pre-built image for one (torch, cuda, py-abis) group |
-| `publish.py` | Move new wheels into the public serve root and regenerate HTML indexes |
+| `publish.py` | Move new wheels into the public serve root and regenerate per-cuda PEP 503 indexes |
 | `notify.py` | POST to ntfy.sh (or any compatible endpoint) on failure |
 | `run.py` | Orchestrator: detect -> plan -> warm images -> build -> publish -> evict -> notify |
 | `systemd/concomtorch-wheels.service` | Oneshot service that runs `run.py` |
@@ -24,24 +27,35 @@ index that pip consumes via `--extra-index-url` or `--find-links`.
 
 ```
 /srv/concomtorch/              # git clone of this repo
-  .venv/                       # uv sync --group build
-  ci/
+  .venv/                       # uv sync (outer env: pyyaml, torch-wheel-index, cibuildwheel)
+  pyproject.toml               # outer CI env (sets [tool.uv] package = false)
+  ci/                          # orchestration scripts (this directory)
+  package/                     # the buildable wheel (own pyproject + setup.py)
+    pyproject.toml             # [project] dynamic = ["version","dependencies"]
+    setup.py                   # composes PEP 440 local version from env vars
+    csrc/
+    src/concomtorch/
   wheelhouse/                  # cibuildwheel output staging
   public/                      # web-served root
-    index.html
-    torch-2.4+cu121.html
-    torch-2.4+cu124.html
-    ...
+    index.html                 # human landing page
+    cu121/
+      index.html               # PEP 503 channel root
+      concomtorch/
+        index.html             # PEP 503 project page
+    cu124/
+      ...
     files/*.whl
 ```
 
-caddy (or nginx) is pointed at `/srv/concomtorch/public/`. Users install with:
+caddy (or nginx) is pointed at `/srv/concomtorch/public/`. Users select the channel matching
+their installed torch CUDA build:
 
 ```
-pip install --extra-index-url https://wheels.<your-domain>/ concomtorch
-# or pin explicitly:
-pip install concomtorch --find-links https://wheels.<your-domain>/torch-2.4+cu121.html
+pip install concomtorch --extra-index-url https://wheels.<your-domain>/cu121/
 ```
+
+The user picks the cuda variant; pip picks the torch minor automatically via the
+`torch==X.Y.*` requirement baked into each wheel at build time.
 
 ## Bootstrap
 
@@ -51,7 +65,7 @@ sudo useradd -r -m -d /srv/concomtorch -s /bin/bash concomtorch
 sudo usermod -aG docker concomtorch
 sudo -u concomtorch git clone https://github.com/<you>/concomtorch /srv/concomtorch
 cd /srv/concomtorch
-sudo -u concomtorch uv sync --group build
+sudo -u concomtorch uv sync
 
 sudo cp ci/systemd/concomtorch-wheels.{service,timer} /etc/systemd/system/
 sudo systemctl daemon-reload
@@ -101,6 +115,6 @@ Each image is roughly 5-15 GB.
 
 - One server. No CI server. Releases are infrequent and the state (wheel exists / doesn't) lives
   on disk where the wheels live. systemd handles scheduling, journald handles logs.
-- `gen_docker.py` (now `build_wheel.py`) is the build engine, unchanged in spirit.
+- `build_wheel.py` is the per-group build engine: one cibuildwheel invocation per (torch, cuda, py-abis) tuple, against a pre-built manylinux+CUDA image.
 - `torch-wheel-index` is the detection layer.
 - PyG-style flat HTML index is the simplest self-hostable, pip-friendly publish format.
