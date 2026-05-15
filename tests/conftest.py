@@ -91,9 +91,12 @@ def pytest_collection_modifyitems(
     items: list[pytest.Item],
 ) -> None:
     """
-    Deselect slow tests unless opted in, then skip GPU tests locally.
+    Run slow tests when opted in or in the GPU gate, then skip GPU tests locally.
 
-    Slow handling is independent of CUDA. The GPU skip is only reached
+    Slow tests run when ``--run-slow`` is passed or when the in-container
+    wheel gate is active (``CONCOMTORCH_REQUIRE_GPU=1``), so the gate
+    verifies the scale/stress suite against the repaired wheel. In a
+    local default run they are deselected. The GPU skip is only reached
     when a GPU is not required (a required-but-absent GPU already aborted
     in pytest_configure), so skipping here is safe for local development.
 
@@ -104,8 +107,10 @@ def pytest_collection_modifyitems(
     items : list[pytest.Item]
         Collected test items, modified in place.
     """
-    if not config.getoption("--run-slow"):
-        skip_slow = pytest.mark.skip(reason="slow test; pass --run-slow to enable")
+    if not config.getoption("--run-slow") and not _require_gpu():
+        skip_slow = pytest.mark.skip(
+            reason="slow test; pass --run-slow to enable (the in-container GPU gate runs these automatically)"
+        )
         for item in items:
             if "slow" in item.keywords:
                 item.add_marker(skip_slow)
