@@ -38,6 +38,15 @@ dev = [
     "black>=23.0.0",
     "ruff>=0.1.0",
 ]
+# Installed with the repaired wheel via CIBW_TEST_EXTRAS_LINUX=test during the
+# in-container test gate. torch is intentionally excluded: the matching
+# +cuXXX CUDA build is installed in CIBW_BEFORE_TEST_LINUX from the pytorch
+# index, because PyPI does not carry that local-version build.
+test = [
+    "pytest>=8",
+    "numpy>=1.26",
+    "scipy>=1.11",
+]
 
 [tool.setuptools]
 packages = ["concomtorch"]
