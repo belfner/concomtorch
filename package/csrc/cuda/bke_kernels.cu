@@ -465,6 +465,12 @@ torch::Tensor bke_cuda_forward(
         labels = labels.contiguous();
     }
 
+    // Empty image: nothing to label. Returning here avoids a zero-sized
+    // CUDA grid (an invalid launch configuration).
+    if (height == 0 || width == 0) {
+        return labels;
+    }
+
     const int64_t step_I = width;  // Contiguous row-major storage
     const int64_t step_L = width;
 
@@ -482,7 +488,7 @@ torch::Tensor bke_cuda_forward(
     // BKE Algorithm: 5 kernels following the paper
 
     // Kernel 1: Initialization (build BitSet, link to minimum neighbor, mark deferred unions)
-    AT_DISPATCH_INTEGRAL_TYPES(input_cont.scalar_type(), "bke_init_kernel", [&] {
+    AT_DISPATCH_INTEGRAL_TYPES_AND(at::ScalarType::Bool, input_cont.scalar_type(), "bke_init_kernel", [&] {
         bke_init_kernel<scalar_t><<<blocks, threads>>>(
             input_cont.data_ptr<scalar_t>(),
             labels.data_ptr<int32_t>(),
@@ -647,6 +653,13 @@ torch::Tensor get_component_masks_cuda(
     // Handle empty case
     if (num_components == 0) {
         return torch::empty({0, height, width},
+            torch::TensorOptions().dtype(torch::kUInt8).device(labels_cont.device()));
+    }
+
+    // Empty label map with caller-supplied components: return correctly
+    // shaped all-zero masks without launching a zero-sized grid.
+    if (num_pixels == 0) {
+        return torch::zeros({num_components, height, width},
             torch::TensorOptions().dtype(torch::kUInt8).device(labels_cont.device()));
     }
 
