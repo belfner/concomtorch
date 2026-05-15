@@ -5,9 +5,11 @@ Orchestrate one tick of the wheel build loop.
 Steps:
   1. Detect what PyTorch publishes and matrix.yaml allows.
   2. Diff against the on-disk wheelhouse to produce a plan grouped by (torch, cuda).
-  3. For each group, invoke ci/build_wheel.py with the requested py ABIs.
-  4. Move resulting wheels into the public serve root and regenerate HTML indexes.
-  5. Notify on failure.
+  3. Warm up docker images for the cuda variants the plan needs, in parallel.
+  4. For each (torch, cuda) group, invoke ci/build_wheel.py serially (GPU box).
+  5. Move resulting wheels into the public serve root and regenerate HTML indexes.
+  6. Evict least-recently-used images down to max_resident_images.
+  7. Notify on failure.
 
 Designed to be invoked by a systemd timer or cron.
 """
@@ -23,6 +25,10 @@ from detect import (
     enumerate_wanted,
     fetch_catalog,
     load_matrix,
+)
+from docker_pool import (
+    ensure_images_parallel,
+    evict_lru,
 )
 from notify import notify
 from plan import (
@@ -79,11 +85,19 @@ def main() -> int:
                         help='Print the plan but do not build.')
     parser.add_argument('--limit', type=int, default=None,
                         help='Cap the number of (torch, cuda) groups built this tick.')
+    parser.add_argument('--skip-image-warmup', action='store_true',
+                        help='Assume images exist; skip parallel docker build phase.')
+    parser.add_argument('--skip-eviction', action='store_true',
+                        help='Skip LRU eviction at the end of the tick.')
     args = parser.parse_args()
 
     started = time.monotonic()
 
     matrix = load_matrix(args.matrix)
+    docker_cfg = matrix.get('docker', {})
+    max_parallel = int(docker_cfg.get('max_parallel_builds', 2))
+    max_resident = int(docker_cfg.get('max_resident_images', 3))
+
     catalog = fetch_catalog()
     wanted = enumerate_wanted(matrix, catalog)
     present = scan_wheelhouse(args.serve_root / 'files') | scan_wheelhouse(args.wheelhouse)
@@ -104,14 +118,34 @@ def main() -> int:
     if args.dry_run:
         return 0
 
+    active_cuda = sorted({cuda for _, cuda, _ in groups})
+    print(f'\nActive cuda variants this tick: {active_cuda}', flush=True)
+
+    image_failures: list[str] = []
+    if not args.skip_image_warmup:
+        _success, image_failures = ensure_images_parallel(active_cuda, max_parallel=max_parallel)
+        if len(image_failures) > 0:
+            print(f'Image warmup failed for: {image_failures}. Groups using those variants will be skipped.',
+                  flush=True)
+
+    skip_cuda = set(image_failures)
     failures: list[tuple[str, str]] = []
     for torch, cuda, pys in groups:
+        if cuda in skip_cuda:
+            failures.append((torch, cuda))
+            print(f'  - skipping {torch} / {cuda}: image unavailable', flush=True)
+            continue
         ok = build_one(torch, cuda, pys, args.wheelhouse)
         if not ok:
             failures.append((torch, cuda))
             print(f'  ! build failed for {torch} / {cuda}', flush=True)
             continue
         publish(args.wheelhouse, args.serve_root)
+
+    if not args.skip_eviction:
+        evicted = evict_lru(max_resident, keep=set(active_cuda))
+        if len(evicted) > 0:
+            print(f'Evicted {len(evicted)} image(s): {evicted}', flush=True)
 
     elapsed = time.monotonic() - started
     summary = (

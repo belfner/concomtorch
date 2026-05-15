@@ -7,6 +7,15 @@
 
 torch_min: '2.4.0'
 
+# Docker image pool tuning.
+# max_parallel_builds caps concurrent `docker build` invocations during warmup.
+# max_resident_images caps how many manylinux+CUDA images may live on disk at once.
+# Each image is ~5-15GB. Images for cuda variants in the active plan are never evicted.
+docker:
+  max_parallel_builds: 2
+  max_resident_images: 3
+
+
 python_abis:
   - cp310
   - cp311

@@ -1,32 +1,27 @@
 #!/usr/bin/env python3
 """
-Build manylinux wheels for one (torch_version, cuda_variant, py_abis) combination.
+Run cibuildwheel against a pre-built manylinux+CUDA image to produce wheels for one
+(torch_version, cuda_variant, py_abis) combination.
 
-Builds a manylinux_2_28 docker image with the matching CUDA toolkit, then runs cibuildwheel
-inside it to produce wheels in the output directory. Wheels are named with a PEP 440 local
-version suffix `+cu{N}torch{X.Y}` via CONCOMTORCH_CUDA and CONCOMTORCH_TORCH env vars consumed
-by setup.py.
+Image lifecycle (build, prune) lives in ci/docker_pool.py; this script assumes the image exists.
+Wheels emerge named with the PEP 440 local version `+cu{N}torch{X.Y}` because setup.py reads
+CONCOMTORCH_CUDA / CONCOMTORCH_TORCH from CIBW_ENVIRONMENT.
 """
+from __future__ import annotations
+
 import argparse
 import os
 import shlex
 import subprocess
 import sys
-import tempfile
 from pathlib import Path
 
-CUDA_MATRIX = {
-    'cu118': ('11.8', '11-8'),
-    'cu121': ('12.1', '12-1'),
-    'cu124': ('12.4', '12-4'),
-    'cu126': ('12.6', '12-6'),
-    'cu127': ('12.7', '12-7'),
-    'cu128': ('12.8', '12-8'),
-    'cu129': ('12.9', '12-9'),
-    'cu130': ('13.0', '13-0'),
-}
-
-DEFAULT_MANYLINUX_IMAGE = 'quay.io/pypa/manylinux_2_28_x86_64'
+from docker_pool import (
+    CUDA_MATRIX,
+    build_image,
+    image_tag,
+    list_resident,
+)
 
 
 def normalize_abi(tag: str) -> str:
@@ -45,27 +40,16 @@ def normalize_abis(tags: list[str]) -> list[str]:
     return [normalize_abi(t) for t in tags]
 
 
-def run(cmd: list[str], *, cwd: Path | None = None, env: dict | None = None) -> None:
-    print('>>', ' '.join(shlex.quote(c) for c in cmd))
-    subprocess.check_call(cmd, cwd=str(cwd) if cwd else None, env=env)
+def compute_cibw_build_pattern(py_abis: list[str]) -> str:
+    """
+    Render the CIBW_BUILD glob pattern for the requested CPython ABIs on linux x86_64.
+    """
+    return ' '.join(f'{abi}-manylinux_x86_64' for abi in normalize_abis(py_abis))
 
 
 def torch_minor(version: str) -> str:
     """
     Extract the MAJOR.MINOR portion of a torch version string.
-
-    Local version suffixes embed the minor release (e.g. '+cu121torch2.4') because every patch
-    of a given torch minor shares the same ABI.
-
-    Parameters
-    ----------
-    version : str
-        Full torch version string, e.g. '2.4.1'.
-
-    Returns
-    -------
-    str
-        Major.minor, e.g. '2.4'.
     """
     parts = version.split('.')
     if len(parts) < 2:
@@ -73,41 +57,13 @@ def torch_minor(version: str) -> str:
     return f'{parts[0]}.{parts[1]}'
 
 
-def make_dockerfile_text(
-    manylinux_image: str,
-    cuda_major_minor: str,
-    cuda_pkg_suffix: str,
-) -> str:
-    """
-    Render a Dockerfile that installs CUDA toolkit + GCC toolset 12 on manylinux_2_28.
-    """
-    return f"""\
-# syntax=docker/dockerfile:1
-ARG BASE_IMAGE={manylinux_image}
-FROM ${{BASE_IMAGE}}
-
-RUN yum -y install dnf-plugins-core curl git && \\
-    yum -y config-manager --add-repo https://developer.download.nvidia.com/compute/cuda/repos/rhel8/x86_64/cuda-rhel8.repo && \\
-    yum -y clean all && rm -rf /var/cache/yum
-
-RUN yum -y install gcc-toolset-12-gcc gcc-toolset-12-gcc-c++ gcc-toolset-12-binutils && \\
-    yum -y clean all && rm -rf /var/cache/yum
-
-RUN yum -y install cuda-toolkit-{cuda_pkg_suffix} && \\
-    yum -y clean all && rm -rf /var/cache/yum
-
-ENV CUDA_HOME=/usr/local/cuda-{cuda_major_minor}
-ENV PATH=$CUDA_HOME/bin:$PATH
-
-ENV PATH=/opt/rh/gcc-toolset-12/root/usr/bin:$PATH
-ENV LD_LIBRARY_PATH=/opt/rh/gcc-toolset-12/root/usr/lib64:/opt/rh/gcc-toolset-12/root/usr/lib:$LD_LIBRARY_PATH
-"""
+def run(cmd: list[str], *, env: dict | None = None) -> None:
+    print('>>', ' '.join(shlex.quote(c) for c in cmd), flush=True)
+    subprocess.check_call(cmd, env=env)
 
 
 def parse_args() -> argparse.Namespace:
-    p = argparse.ArgumentParser(
-        description='Build manylinux wheels inside a CUDA-enabled manylinux container.'
-    )
+    p = argparse.ArgumentParser(description=__doc__)
     p.add_argument('--torch', dest='torch_version', required=True,
                    help='PyTorch version spec, e.g. 2.4.1')
     p.add_argument('--cuda', dest='cuda_variant', required=True,
@@ -115,70 +71,43 @@ def parse_args() -> argparse.Namespace:
                    help='CUDA variant matching PyTorch wheel channel, e.g. cu121')
     p.add_argument('--py', dest='py_abis', nargs='+', required=True,
                    help='One or more CPython ABI tags to build, e.g. cp310 cp311 cp312')
-    p.add_argument('--image-tag', dest='image_tag', default=None,
-                   help='Tag to assign to the built Docker image (default auto-generated).')
-    p.add_argument('--manylinux-image', dest='manylinux_image', default=DEFAULT_MANYLINUX_IMAGE,
-                   help=f'Base image (default: {DEFAULT_MANYLINUX_IMAGE})')
     p.add_argument('--project-dir', dest='project_dir', default='.',
-                   help='Path to the project directory (defaults to current directory).')
+                   help='Path to the project directory.')
     p.add_argument('--output-dir', dest='output_dir', default='wheelhouse',
                    help='Directory on the host to receive built wheels.')
+    p.add_argument('--ensure-image', action='store_true',
+                   help='Build the docker image if missing (default: error out instead).')
     return p.parse_args()
 
 
-def compute_cibw_build_pattern(py_abis: list[str]) -> str:
-    abis = normalize_abis(py_abis)
-    parts = [f'{abi}-manylinux_x86_64' for abi in abis]
-    return ' '.join(parts)
-
-
-def ensure_dirs(*paths: Path) -> None:
-    for p in paths:
-        p.mkdir(parents=True, exist_ok=True)
-
-
-def main() -> None:
+def main() -> int:
     args = parse_args()
-
-    if args.cuda_variant not in CUDA_MATRIX:
-        print(f'Unsupported CUDA variant: {args.cuda_variant}', file=sys.stderr)
-        sys.exit(2)
-    cuda_major_minor, cuda_pkg_suffix = CUDA_MATRIX[args.cuda_variant]
+    cuda_major_minor, _ = CUDA_MATRIX[args.cuda_variant]
 
     project_dir = Path(args.project_dir).resolve()
     output_dir = Path(args.output_dir).resolve()
-    ensure_dirs(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
 
-    image_tag = (
-        args.image_tag
-        or f'concomtorch-manylinux-{args.cuda_variant}:torch-{args.torch_version}'
-    )
+    tag = image_tag(args.cuda_variant)
+    resident = {info.cuda_variant for info in list_resident()}
+    if args.cuda_variant not in resident:
+        if args.ensure_image:
+            print(f'Image {tag} not found; building.', flush=True)
+            build_image(args.cuda_variant)
+        else:
+            print(
+                f'Image {tag} not resident. Either run ci/docker_pool.py ensure {args.cuda_variant} '
+                f'first or pass --ensure-image.',
+                file=sys.stderr,
+            )
+            return 2
 
-    dockerfile_text = make_dockerfile_text(
-        manylinux_image=args.manylinux_image,
-        cuda_major_minor=cuda_major_minor,
-        cuda_pkg_suffix=cuda_pkg_suffix,
-    )
-
-    with tempfile.TemporaryDirectory() as tmpdir_str:
-        tmpdir = Path(tmpdir_str)
-        dockerfile_path = tmpdir / 'Dockerfile'
-        dockerfile_path.write_text(dockerfile_text, encoding='utf-8')
-
-        run([
-            'docker', 'build',
-            '-t', image_tag,
-            '--build-arg', f'BASE_IMAGE={args.manylinux_image}',
-            str(tmpdir),
-        ])
-
-    norm_abis = normalize_abis(args.py_abis)
     torch_mm = torch_minor(args.torch_version)
 
     cibw_env = os.environ.copy()
     cibw_env.update({
-        'CIBW_MANYLINUX_X86_64_IMAGE': image_tag,
-        'CIBW_BUILD': compute_cibw_build_pattern(norm_abis),
+        'CIBW_MANYLINUX_X86_64_IMAGE': tag,
+        'CIBW_BUILD': compute_cibw_build_pattern(args.py_abis),
         'CIBW_BUILD_FRONTEND': 'pip; args: --no-build-isolation',
         'CIBW_SKIP': '*musllinux*',
         'CIBW_BEFORE_BUILD': (
@@ -218,8 +147,9 @@ def main() -> None:
         env=cibw_env,
     )
 
-    print('\nWheels written to:', output_dir)
+    print('\nWheels written to:', output_dir, flush=True)
+    return 0
 
 
 if __name__ == '__main__':
-    main()
+    sys.exit(main())

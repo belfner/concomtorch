@@ -9,13 +9,14 @@ index that pip consumes via `--extra-index-url` or `--find-links`.
 
 | File | Role |
 |---|---|
-| `matrix.yaml` | Source of truth: cuda variants, py ABIs, torch_min, exclusions |
+| `matrix.yaml` | Source of truth: cuda variants, py ABIs, torch_min, exclusions, docker pool sizing |
 | `detect.py` | Query `torch-wheel-index`, intersect with matrix.yaml, emit WANTED set |
 | `plan.py` | Diff WANTED against wheelhouse contents, emit build plan grouped by (torch, cuda) |
-| `build_wheel.py` | Build manylinux+CUDA docker image and run cibuildwheel for one group |
+| `docker_pool.py` | List, build (parallel), and LRU-evict the manylinux+CUDA image cache |
+| `build_wheel.py` | Run cibuildwheel against a pre-built image for one (torch, cuda, py-abis) group |
 | `publish.py` | Move new wheels into the public serve root and regenerate HTML indexes |
 | `notify.py` | POST to ntfy.sh (or any compatible endpoint) on failure |
-| `run.py` | Orchestrator: detect to plan to build to publish to notify |
+| `run.py` | Orchestrator: detect -> plan -> warm images -> build -> publish -> evict -> notify |
 | `systemd/concomtorch-wheels.service` | Oneshot service that runs `run.py` |
 | `systemd/concomtorch-wheels.timer` | Daily timer triggering the service |
 
@@ -77,7 +78,24 @@ python ci/detect.py --format text
 
 # Plan only
 python ci/plan.py
+
+# Inspect the image pool
+python ci/docker_pool.py list
+
+# Pre-warm images for a set of cuda variants (parallel)
+python ci/docker_pool.py ensure --max-parallel 2 cu121 cu124 cu128
+
+# Trim the pool to N images, never evicting the cuda variants in --keep
+python ci/docker_pool.py evict --max-resident 3 --keep cu129 cu130
 ```
+
+## Image pool
+
+`matrix.yaml.docker.max_parallel_builds` caps how many `docker build` invocations run
+simultaneously during the warmup phase of a tick. `matrix.yaml.docker.max_resident_images`
+caps how many manylinux+CUDA images live on disk at the end of a tick. Images for cuda
+variants in the active plan are never evicted; among the rest, the oldest is removed first.
+Each image is roughly 5-15 GB.
 
 ## Why this shape
 
