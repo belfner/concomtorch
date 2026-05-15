@@ -30,9 +30,8 @@ _load_extension()
 def connected_components(
     input: torch.Tensor,
     labels: torch.Tensor | None = None,
-    algorithm: str = 'bke_ic',
-    return_num_components: bool = False
-) -> torch.Tensor | tuple[torch.Tensor, int]:
+    algorithm: str = 'bke_ic'
+) -> torch.Tensor:
     """
     Label connected components in a 2D binary image (CUDA only).
 
@@ -56,15 +55,11 @@ def connected_components(
         - 'bke_ic': BKE with InlineCompression (recommended)
         - 'bke': Standard BKE
 
-    return_num_components : bool, default=False
-        If True, also return the number of connected components found.
-
     Returns
     -------
-    torch.Tensor or tuple[torch.Tensor, int]
+    torch.Tensor
         Integer CUDA tensor of shape (H, W) with dtype int32.
         Background pixels are labeled 0, components labeled 1, 2, 3, ...
-        If return_num_components=True, returns (labels, num_components).
 
     Raises
     ------
@@ -95,7 +90,9 @@ def connected_components(
 
     Get component count:
 
-    >>> labels, num_components = connected_components(img, return_num_components=True)
+    >>> from concomtorch import connected_components, get_unique_labels
+    >>> labels = connected_components(img)
+    >>> num_components = len(get_unique_labels(labels))
     >>> print(f'Found {num_components} objects')
 
     Notes
@@ -131,20 +128,14 @@ def connected_components(
 
     # Select algorithm
     if algorithm == 'bke_ic':
-        result = torch.ops.concomtorch.connected_components_bke_ic(input, labels)
+        return torch.ops.concomtorch.connected_components_bke_ic(input, labels)
     elif algorithm == 'bke':
-        result = torch.ops.concomtorch.connected_components_bke(input, labels)
+        return torch.ops.concomtorch.connected_components_bke(input, labels)
     else:
         raise ValueError(
             f"Unknown algorithm: '{algorithm}'. "
             "Valid options are: 'bke', 'bke_ic'"
         )
-
-    if return_num_components:
-        num_components = result.max().item()
-        return result, num_components
-
-    return result
 
 
 def create_labels_buffer(
@@ -187,6 +178,203 @@ def create_labels_buffer(
     return torch.empty(shape, dtype=torch.int32, device=device)
 
 
+def get_unique_labels(
+    labels: torch.Tensor,
+    exclude_background: bool = True,
+    collapse_consecutive: bool = True
+) -> torch.Tensor:
+    """
+    Get unique component labels efficiently.
+
+    Helper function to extract unique label values from a connected components
+    output. Optimized for CCL outputs using consecutive value collapsing.
+
+    Parameters
+    ----------
+    labels : torch.Tensor
+        Labeled image from connected_components(), shape (H, W), dtype int32.
+        Must be on CUDA device.
+
+    exclude_background : bool, default=True
+        If True, exclude background pixels (label 0) from result.
+        If False, include background in the unique labels.
+
+    collapse_consecutive : bool, default=True
+        If True, use torch.unique(torch.unique_consecutive(labels.flatten()))
+        for faster computation. Recommended for connected component labels
+        which have large contiguous regions of identical values.
+        If False, use standard torch.unique(labels) directly.
+
+    Returns
+    -------
+    torch.Tensor
+        Unique label values as int32 tensor on CUDA, sorted in ascending order.
+        Returns empty tensor if no labels found.
+
+    Raises
+    ------
+    RuntimeError
+        If labels tensor is not on CUDA device.
+
+    ValueError
+        If labels tensor has wrong dtype or dimensionality.
+
+    Notes
+    -----
+    - collapse_consecutive=True is significantly faster for CCL outputs
+      (e.g., 512x512 image: ~262K → ~100 elements to unique)
+    - Use this to count components: len(get_unique_labels(labels))
+    - Returned labels are sorted, but order doesn't reflect spatial position
+
+    Examples
+    --------
+    Get unique component labels:
+
+    >>> labels = connected_components(img)
+    >>> unique = get_unique_labels(labels)
+    >>> num_components = len(unique)
+
+    Include background in results:
+
+    >>> unique_with_bg = get_unique_labels(labels, exclude_background=False)
+
+    Use standard unique (slower but works for any tensor):
+
+    >>> unique = get_unique_labels(labels, collapse_consecutive=False)
+    """
+    if not labels.is_cuda:
+        raise RuntimeError(
+            f'Labels tensor must be on CUDA device, got {labels.device}'
+        )
+
+    if labels.dtype != torch.int32:
+        raise ValueError(f'Labels tensor must be int32, got {labels.dtype}')
+
+    if labels.dim() != 2:
+        raise ValueError(
+            f'Labels tensor must be 2D (H, W), got shape {labels.shape}'
+        )
+
+    # Call the CUDA implementation
+    return torch.ops.concomtorch.get_unique_labels(labels, exclude_background, collapse_consecutive)
+
+
+def get_component_masks(
+    labels: torch.Tensor,
+    unique_labels: torch.Tensor | None = None,
+    exclude_background: bool = True,
+    collapse_consecutive: bool = True
+) -> torch.Tensor:
+    """
+    Convert labeled component map to binary masks.
+
+    Takes the output of connected_components() and returns individual binary
+    masks for each detected component. More memory-efficient than creating
+    one-hot encodings and supports non-sequential label values.
+
+    Parameters
+    ----------
+    labels : torch.Tensor
+        Labeled image from connected_components(), shape (H, W), dtype int32.
+        Must be on CUDA device.
+
+    unique_labels : torch.Tensor, optional
+        Pre-computed unique label values, shape (N,), dtype int32, on CUDA.
+        If provided, creates masks only for these specific labels, enabling:
+        - Avoiding redundant torch.unique() calls when already computed
+        - Filtering to subset of components (e.g., by size threshold)
+        - Custom ordering of output masks
+        When provided, exclude_background and collapse_consecutive are ignored.
+        If None, computes unique labels automatically.
+
+    exclude_background : bool, default=True
+        If True, exclude background pixels (label 0) from output masks.
+        If False, include background as the first mask.
+        Only applies when unique_labels is None (auto-compute mode).
+
+    collapse_consecutive : bool, default=True
+        If True, use torch.unique(torch.unique_consecutive(labels)) for faster
+        unique label computation. Recommended for connected component labels
+        which have large contiguous regions of identical values.
+        If False, use standard torch.unique(labels) directly.
+        Only applies when unique_labels is None (auto-compute mode).
+
+    Returns
+    -------
+    torch.Tensor
+        Binary masks of shape (N, H, W) with dtype uint8, where N is the
+        number of components. Each mask[i] is 1 where that component exists,
+        0 elsewhere. Returns empty tensor (0, H, W) if no components found.
+
+    Raises
+    ------
+    RuntimeError
+        If labels tensor is not on CUDA device.
+
+    ValueError
+        If labels tensor has wrong dtype or dimensionality.
+        If unique_labels provided but has wrong dtype, device, or shape.
+
+    Notes
+    -----
+    - Output uses uint8 (not bool) for better compatibility with image ops
+    - Handles non-sequential labels efficiently (no remapping needed)
+    - Components ordered by label value (arbitrary, based on spatial position)
+    - Typical performance: ~0.1-0.5ms for images with 5-100 components
+    - All data stays on GPU (no CPU copies)
+    - collapse_consecutive=True significantly faster for CCL (512x512: ~262K → ~100 elements to sort)
+
+    Examples
+    --------
+    Basic usage (auto-compute unique labels with fast collapse):
+
+    >>> labels = connected_components(img)
+    >>> masks = get_component_masks(labels)  # (N, H, W), uses collapse_consecutive=True
+
+    Reuse unique labels to avoid redundant computation:
+
+    >>> from concomtorch import get_unique_labels
+    >>> unique = get_unique_labels(labels)
+    >>> num_components = len(unique)
+    >>> masks = get_component_masks(labels, unique)  # faster
+
+    Filter to specific components (e.g., by size):
+
+    >>> unique = get_unique_labels(labels, exclude_background=False)
+    >>> sizes = torch.bincount(labels.flatten())[unique]
+    >>> large_labels = unique[sizes > 100]
+    >>> masks = get_component_masks(labels, large_labels)  # only large components
+    """
+    if not labels.is_cuda:
+        raise RuntimeError(
+            f'Labels tensor must be on CUDA device, got {labels.device}'
+        )
+
+    if labels.dtype != torch.int32:
+        raise ValueError(f'Labels tensor must be int32, got {labels.dtype}')
+
+    if labels.dim() != 2:
+        raise ValueError(
+            f'Labels tensor must be 2D (H, W), got shape {labels.shape}'
+        )
+
+    if unique_labels is not None:
+        if not unique_labels.is_cuda:
+            raise ValueError(
+                f'unique_labels must be on CUDA device, got {unique_labels.device}'
+            )
+        if unique_labels.dtype != torch.int32:
+            raise ValueError(
+                f'unique_labels must be int32, got {unique_labels.dtype}'
+            )
+        if unique_labels.dim() != 1:
+            raise ValueError(
+                f'unique_labels must be 1D, got shape {unique_labels.shape}'
+            )
+
+    return torch.ops.concomtorch.get_component_masks(labels, unique_labels, exclude_background, collapse_consecutive)
+
+
 class ConnectedComponentsLabeler:
     """
     Helper class for efficient repeated connected component labeling.
@@ -227,7 +415,9 @@ class ConnectedComponentsLabeler:
     ...     # Process labels...
     >>>
     >>> # Get component count
-    >>> labels, num_components = labeler(img, return_num_components=True)
+    >>> from concomtorch import get_unique_labels
+    >>> labels = labeler(img)
+    >>> num_components = len(get_unique_labels(labels))
     """
 
     def __init__(
@@ -243,9 +433,8 @@ class ConnectedComponentsLabeler:
 
     def __call__(
         self,
-        input: torch.Tensor,
-        return_num_components: bool = False
-    ) -> torch.Tensor | tuple[torch.Tensor, int]:
+        input: torch.Tensor
+    ) -> torch.Tensor:
         """
         Label connected components in input image.
 
@@ -253,14 +442,11 @@ class ConnectedComponentsLabeler:
         ----------
         input : torch.Tensor
             Binary tensor of shape (H, W) matching the configured image_size.
-        return_num_components : bool, default=False
-            If True, also return the number of connected components.
 
         Returns
         -------
-        torch.Tensor or tuple[torch.Tensor, int]
+        torch.Tensor
             Label tensor of shape (H, W).
-            If return_num_components=True, returns (labels, num_components).
 
         Raises
         ------
@@ -276,8 +462,7 @@ class ConnectedComponentsLabeler:
         return connected_components(
             input,
             labels=self.labels_buffer,
-            algorithm=self.algorithm,
-            return_num_components=return_num_components
+            algorithm=self.algorithm
         )
 
     def __repr__(self) -> str:
@@ -288,4 +473,10 @@ class ConnectedComponentsLabeler:
 
 
 __version__ = '0.1.0'
-__all__ = ['connected_components', 'create_labels_buffer', 'ConnectedComponentsLabeler']
+__all__ = [
+    'connected_components',
+    'create_labels_buffer',
+    'get_unique_labels',
+    'get_component_masks',
+    'ConnectedComponentsLabeler'
+]

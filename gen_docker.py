@@ -10,8 +10,9 @@ import tempfile
 from pathlib import Path
 
 CUDA_MATRIX = {
-    # CUDA variant  -> (CUDA_MAJOR_MINOR, CUDA_PKG_SUFFIX)
+    # CUDA variant -> (CUDA_MAJOR_MINOR, CUDA_PKG_SUFFIX)
     # Suffix is used in yum package name "cuda-toolkit-12-1"
+    "cu118": ("11.8", "11-8"),
     "cu121": ("12.1", "12-1"),
     "cu124": ("12.4", "12-4"),
     "cu126": ("12.6", "12-6"),
@@ -71,6 +72,10 @@ RUN yum -y install dnf-plugins-core curl git && \\
     yum -y config-manager --add-repo https://developer.download.nvidia.com/compute/cuda/repos/rhel8/x86_64/cuda-rhel8.repo && \\
     yum -y clean all && rm -rf /var/cache/yum
 
+# Install GCC toolset 12 (CUDA 12.x requires GCC <= 12)
+RUN yum -y install gcc-toolset-12-gcc gcc-toolset-12-gcc-c++ gcc-toolset-12-binutils && \\
+    yum -y clean all && rm -rf /var/cache/yum
+
 # Install CUDA toolkit matching the chosen CUDA variant (for nvcc + headers)
 # E.g. cuda-toolkit-12-1, cuda-toolkit-12-4, etc.
 RUN yum -y install cuda-toolkit-{cuda_pkg_suffix} && \\
@@ -79,6 +84,10 @@ RUN yum -y install cuda-toolkit-{cuda_pkg_suffix} && \\
 # Expose CUDA_HOME and PATH (nvcc)
 ENV CUDA_HOME=/usr/local/cuda-{cuda_major_minor}
 ENV PATH=$CUDA_HOME/bin:$PATH
+
+# Enable GCC toolset 12 by default
+ENV PATH=/opt/rh/gcc-toolset-12/root/usr/bin:$PATH
+ENV LD_LIBRARY_PATH=/opt/rh/gcc-toolset-12/root/usr/lib64:/opt/rh/gcc-toolset-12/root/usr/lib:$LD_LIBRARY_PATH
 """
     # cibuildwheel and torch are installed at runtime to allow matrix flexibility
 
@@ -145,6 +154,50 @@ def ensure_dirs(*paths: Path) -> None:
         p.mkdir(parents=True, exist_ok=True)
 
 
+def rename_wheels_with_build_tag(output_dir: Path, torch_version: str, cuda_variant: str) -> None:
+    """
+    Rename wheels to include PyTorch and CUDA version as build tag.
+
+    Example:
+        concomtorch-0.1.0-cp310-cp310-manylinux_2_17_x86_64...whl
+        -> concomtorch-0.1.0-torch2.4.1cu121-cp310-cp310-manylinux_2_17_x86_64...whl
+
+    Parameters
+    ----------
+    output_dir : Path
+        Directory containing the built wheels.
+    torch_version : str
+        PyTorch version (e.g., '2.4.1').
+    cuda_variant : str
+        CUDA variant (e.g., 'cu121').
+    """
+    build_tag = f'torch{torch_version}{cuda_variant}'
+
+    for wheel_path in output_dir.glob('*.whl'):
+        # Parse wheel filename: {name}-{version}-{build_tag}-{pyver}-{abi}-{platform}.whl
+        parts = wheel_path.stem.split('-')
+        if len(parts) >= 5:
+            name = parts[0]
+            version = parts[1]
+            # Check if build tag already exists (would be between version and pyver)
+            if len(parts) >= 6 and parts[2].startswith('torch'):
+                # Already has build tag, skip
+                print(f'Skipping (already tagged): {wheel_path.name}')
+                continue
+
+            # Insert build tag after version (before python version which starts with 'cp')
+            new_parts = [name, version, build_tag] + parts[2:]
+            new_filename = '-'.join(new_parts) + '.whl'
+            new_path = wheel_path.parent / new_filename
+
+            print(f'Renaming: {wheel_path.name}')
+            print(f'      ->: {new_filename}')
+            wheel_path.rename(new_path)
+        else:
+            print(f'Warning: Unexpected wheel filename format: {wheel_path.name}')
+            continue
+
+
 def main() -> None:
     args = parse_args()
 
@@ -202,7 +255,7 @@ def main() -> None:
             f'python -m pip install --upgrade pip && '
             f'python -m pip install "torch=={args.torch_version}+{args.cuda_variant}" '
             f'--index-url https://download.pytorch.org/whl/{args.cuda_variant}/ && '
-            'python -m pip install ninja numpy'
+            'python -m pip install setuptools>=70.1.0 wheel ninja numpy'
         ),
         "CIBW_REPAIR_WHEEL_COMMAND_LINUX": (
             'auditwheel repair -w {dest_dir} {wheel} '
@@ -233,7 +286,11 @@ def main() -> None:
         env=cibw_env,
     )
 
-    print("\n✅ Wheels written to:", output_dir)
+    # Rename wheels to include PyTorch and CUDA version in build tag
+    print("\nAdding build tags to wheels...")
+    rename_wheels_with_build_tag(output_dir, args.torch_version, args.cuda_variant)
+
+    print("\nWheels written to:", output_dir)
 
 
 if __name__ == "__main__":

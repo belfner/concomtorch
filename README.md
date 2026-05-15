@@ -80,7 +80,10 @@ for img in image_batch:
 ### Get component count
 
 ```python
-labels, num_components = connected_components(img, return_num_components=True)
+from concomtorch import connected_components, get_unique_labels
+
+labels = connected_components(img)
+num_components = len(get_unique_labels(labels))  # Fast, optimized for CCL
 print(f'Found {num_components} objects')
 ```
 
@@ -96,7 +99,7 @@ labels = connected_components(img, algorithm='bke')
 
 ## API Reference
 
-### `connected_components(input, labels=None, algorithm='bke_ic', return_num_components=False)`
+### `connected_components(input, labels=None, algorithm='bke_ic')`
 
 Label connected components in a binary image using 8-connectivity (CUDA only).
 
@@ -110,11 +113,9 @@ Label connected components in a binary image using 8-connectivity (CUDA only).
   - `'bke_ic'`: BKE with InlineCompression (recommended)
   - `'bke'`: Standard BKE
 
-- `return_num_components` (bool, default=False): If True, also return the number of connected components found.
-
 **Returns:**
 
-- torch.Tensor or tuple[torch.Tensor, int]: Integer CUDA tensor of shape (H, W) with dtype int32. Background pixels are labeled 0, components labeled 1, 2, 3, ... If `return_num_components=True`, returns `(labels, num_components)`.
+- torch.Tensor: Integer CUDA tensor of shape (H, W) with dtype int32. Background pixels are labeled 0, components labeled 1, 2, 3, ...
 
 **Raises:**
 
@@ -134,6 +135,27 @@ Create a reusable buffer for connected components labels.
 **Returns:**
 
 - torch.Tensor: Uninitialized int32 tensor that can be passed to `connected_components()` via the `labels` parameter.
+
+### `get_unique_labels(labels, exclude_background=True, collapse_consecutive=True)`
+
+Get unique component labels efficiently.
+
+**Parameters:**
+
+- `labels` (torch.Tensor): Labeled image from `connected_components()`, shape (H, W), dtype int32.
+
+- `exclude_background` (bool, default=True): If True, exclude background pixels (label 0) from result.
+
+- `collapse_consecutive` (bool, default=True): If True, use `torch.unique(torch.unique_consecutive(labels.flatten()))` for faster computation. Recommended for connected component labels which have large contiguous regions of identical values.
+
+**Returns:**
+
+- torch.Tensor: Unique label values as int32 tensor on CUDA, sorted in ascending order.
+
+**Notes:**
+
+- `collapse_consecutive=True` is significantly faster for CCL outputs (e.g., 512x512 image: ~262K → ~100 elements to unique)
+- Use this to count components: `len(get_unique_labels(labels))`
 
 ## Algorithm
 

@@ -1,4 +1,5 @@
 #include <torch/extension.h>
+#include <ATen/ATen.h>
 #include <cuda_runtime.h>
 #include <cstdint>
 
@@ -116,7 +117,6 @@ __global__ void bke_init_kernel(
     const int64_t xL = y * step_L + x;  // Labels image index
 
     // Initialize block label to its own raster index
-    int32_t block_label = xL;
     int32_t min_label = xL;
 
     // Information byte: bits 0-3 for internal pixel flags, bits 5-7 for union flags
@@ -404,6 +404,24 @@ __global__ void bke_final_labeling_kernel(
     }
 }
 
+// ============================================================================
+// Component Mask Creation
+// ============================================================================
+
+__global__ void create_mask_kernel(
+    const int32_t* __restrict__ labels,
+    uint8_t* __restrict__ mask,
+    const int32_t* __restrict__ unique_labels,
+    const int64_t component_idx,
+    const int64_t num_pixels
+) {
+    const int32_t target_label = unique_labels[component_idx];
+    const int64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= num_pixels) return;
+
+    mask[idx] = (labels[idx] == target_label) ? 1 : 0;
+}
+
 
 // ============================================================================
 // Main BKE forward function
@@ -519,4 +537,128 @@ torch::Tensor bke_std_cuda_forward(
     std::optional<torch::Tensor> labels) {
     torch::Tensor labels_tensor = labels.has_value() ? labels.value() : torch::Tensor();
     return bke_cuda_forward(input, labels_tensor, false);
+}
+
+
+// ============================================================================
+// Unique Label Extraction
+// ============================================================================
+
+torch::Tensor get_unique_labels_cuda(
+    const torch::Tensor& labels,
+    const bool exclude_background,
+    const bool collapse_consecutive
+) {
+    // Validation
+    TORCH_CHECK(labels.is_cuda(), "Labels must be a CUDA tensor");
+    TORCH_CHECK(labels.dim() == 2, "Labels must be 2D (height, width)");
+    TORCH_CHECK(labels.scalar_type() == torch::kInt32, "Labels must be int32");
+
+    auto labels_cont = labels.contiguous();
+
+    torch::Tensor unique_labels_gpu;
+
+    // Compute unique labels using at::_unique2 (stays on GPU)
+    if (collapse_consecutive) {
+        // Collapse consecutive duplicates first, then unique (faster for CCL)
+        // unique_consecutive returns tuple of (output, inverse, counts)
+        auto consecutive_result = torch::unique_consecutive(
+            labels_cont.view({-1}),
+            false,  // return_inverse
+            false,  // return_counts
+            std::nullopt  // dim
+        );
+        auto consecutive = std::get<0>(consecutive_result);
+
+        // Now get unique values from the consecutive-collapsed result
+        auto unique_result = at::_unique2(consecutive, true, false, false);
+        unique_labels_gpu = std::get<0>(unique_result);
+    } else {
+        // Standard unique (sorts entire array)
+        auto unique_result = at::_unique2(labels_cont, true, false, false);
+        unique_labels_gpu = std::get<0>(unique_result);
+    }
+
+    // Filter background if needed
+    if (exclude_background && unique_labels_gpu.size(0) > 0) {
+        auto first_label = unique_labels_gpu[0].item<int32_t>();
+        if (first_label == 0) {
+            unique_labels_gpu = unique_labels_gpu.slice(0, 1, unique_labels_gpu.size(0));
+        }
+    }
+
+    return unique_labels_gpu;
+}
+
+
+// ============================================================================
+// Component Mask Extraction
+// ============================================================================
+
+torch::Tensor get_component_masks_cuda(
+    const torch::Tensor& labels,
+    std::optional<torch::Tensor> unique_labels_opt,
+    const bool exclude_background,
+    const bool collapse_consecutive
+) {
+    // Validation
+    TORCH_CHECK(labels.is_cuda(), "Labels must be a CUDA tensor");
+    TORCH_CHECK(labels.dim() == 2, "Labels must be 2D (height, width)");
+    TORCH_CHECK(labels.scalar_type() == torch::kInt32, "Labels must be int32");
+
+    auto labels_cont = labels.contiguous();
+    const int64_t height = labels_cont.size(0);
+    const int64_t width = labels_cont.size(1);
+    const int64_t num_pixels = height * width;
+
+    torch::Tensor unique_labels_gpu;
+
+    // If unique_labels provided, use directly; otherwise compute
+    if (unique_labels_opt.has_value() && unique_labels_opt.value().defined() &&
+        unique_labels_opt.value().numel() > 0) {
+
+        auto unique_labels_tensor = unique_labels_opt.value();
+
+        // Validate provided unique_labels
+        TORCH_CHECK(unique_labels_tensor.is_cuda(), "unique_labels must be a CUDA tensor");
+        TORCH_CHECK(unique_labels_tensor.dim() == 1, "unique_labels must be 1D");
+        TORCH_CHECK(unique_labels_tensor.scalar_type() == torch::kInt32, "unique_labels must be int32");
+
+        unique_labels_gpu = unique_labels_tensor.contiguous();
+    } else {
+        // Auto-compute using the extracted function
+        unique_labels_gpu = get_unique_labels_cuda(labels_cont, exclude_background, collapse_consecutive);
+    }
+
+    const int64_t num_components = unique_labels_gpu.size(0);
+
+    // Handle empty case
+    if (num_components == 0) {
+        return torch::empty({0, height, width},
+            torch::TensorOptions().dtype(torch::kUInt8).device(labels_cont.device()));
+    }
+
+    // Allocate output tensor: (N, H, W) uint8
+    auto masks = torch::zeros({num_components, height, width},
+        torch::TensorOptions().dtype(torch::kUInt8).device(labels_cont.device()));
+
+    // Launch kernel for each component
+    const int threads_per_block = 256;
+    const int num_blocks = (num_pixels + threads_per_block - 1) / threads_per_block;
+    const int32_t* unique_ptr = unique_labels_gpu.data_ptr<int32_t>();
+
+    for (int64_t i = 0; i < num_components; i++) {
+        create_mask_kernel<<<num_blocks, threads_per_block>>>(
+            labels_cont.data_ptr<int32_t>(),
+            masks[i].data_ptr<uint8_t>(),
+            unique_ptr,
+            i,
+            num_pixels
+        );
+    }
+
+    cudaError_t err = cudaGetLastError();
+    TORCH_CHECK(err == cudaSuccess, "Mask creation failed: ", cudaGetErrorString(err));
+
+    return masks;
 }
