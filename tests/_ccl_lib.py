@@ -17,6 +17,7 @@ failure output is uniform: BKE final labels are raster-root indices + 1,
 never a dense ``1..N`` sequence, so raw label values must never be
 compared directly.
 """
+
 from __future__ import annotations
 
 from collections import deque
@@ -26,9 +27,7 @@ import numpy as np
 import pytest
 
 # 8-connectivity neighbor offsets (the full 3x3 minus the center).
-_NEIGHBORS_8 = tuple(
-    (dy, dx) for dy in (-1, 0, 1) for dx in (-1, 0, 1) if not (dy == 0 and dx == 0)
-)
+_NEIGHBORS_8 = tuple((dy, dx) for dy in (-1, 0, 1) for dx in (-1, 0, 1) if not (dy == 0 and dx == 0))
 
 
 def reference_label(image: np.ndarray) -> np.ndarray:
@@ -162,15 +161,16 @@ def partition_diff(produced: np.ndarray, expected: np.ndarray) -> str | None:
         src_sorted = src[order]
         dst_sorted = dst[order]
         boundaries = np.flatnonzero(np.diff(src_sorted)) + 1
-        for group in np.split(dst_sorted, boundaries):
-            distinct = np.unique(group)
+        # Split source and destination on the same boundaries so each
+        # group's own source label is available for the diagnostic.
+        for src_group, dst_group in zip(np.split(src_sorted, boundaries), np.split(dst_sorted, boundaries)):
+            distinct = np.unique(dst_group)
             if distinct.size > 1:
-                bad_src = src_sorted[np.searchsorted(src_sorted, src_sorted[0])]
+                bad_src = int(src_group[0])
                 return (
-                    f"{name} not a bijection: one component split across "
-                    f"labels {distinct[:8].tolist()} (a {name.split('->')[0]} "
-                    f"label maps to multiple {name.split('->')[1]} labels; "
-                    f"example source label {bad_src})"
+                    f"{name} not a bijection: source label {bad_src} maps to "
+                    f"multiple {name.split('->')[1]} labels {distinct[:8].tolist()} "
+                    f"(one component split across them)"
                 )
     return None
 
@@ -263,35 +263,45 @@ def _concentric_rings(size: int) -> np.ndarray:
     img = np.zeros((size, size), dtype=np.uint8)
     layer = 0
     while layer * 2 + 1 < size:
-        img[layer, layer:size - layer] = 1
-        img[size - 1 - layer, layer:size - layer] = 1
-        img[layer:size - layer, layer] = 1
-        img[layer:size - layer, size - 1 - layer] = 1
+        img[layer, layer : size - layer] = 1
+        img[size - 1 - layer, layer : size - layer] = 1
+        img[layer : size - layer, layer] = 1
+        img[layer : size - layer, size - 1 - layer] = 1
         layer += 2
     return img
 
 
-def _spiral(size: int) -> np.ndarray:
+def _snake(rows: int, cols: int) -> np.ndarray:
     """
-    Single 1px-wide inward spiral path (one component); adjacent arms are
-    separated by a 1px gap so a correct labeler keeps it as one piece
-    without merging across the gap.
+    Single 1px-wide serpentine path (one 8-connected component).
+
+    Full rows on every even row are joined at alternating ends by a
+    single connector pixel on the odd row between them; the rest of each
+    odd row is background, so parallel arms are separated by a 1px gap
+    and are linked only through the long path. A labeler that bleeds
+    across the gap or fails to follow the path produces a different
+    partition than the reference, so this is a strong leak / under-merge
+    detector for the inter-block union.
+
+    Parameters
+    ----------
+    rows : int
+        Image height.
+    cols : int
+        Image width.
+
+    Returns
+    -------
+    np.ndarray
+        2D uint8 image holding one connected serpentine component.
     """
-    img = np.zeros((size, size), dtype=np.uint8)
-    top, bottom, left, right = 0, size - 1, 0, size - 1
-    while top <= bottom and left <= right:
-        for x in range(left, right + 1):
-            img[top, x] = 1
-        for y in range(top, bottom + 1):
-            img[y, right] = 1
-        for x in range(right, left - 1, -1):
-            img[bottom, x] = 1
-        for y in range(bottom, top - 1, -1):
-            img[y, left] = 1
-        top += 2
-        bottom -= 2
-        left += 2
-        right -= 2
+    img = np.zeros((rows, cols), dtype=np.uint8)
+    going_right = True
+    for r in range(0, rows, 2):
+        img[r, :] = 1
+        if r + 1 < rows:
+            img[r + 1, cols - 1 if going_right else 0] = 1
+        going_right = not going_right
     return img
 
 
@@ -384,8 +394,9 @@ def iter_fixed_images() -> Iterator[tuple[str, np.ndarray]]:
     yield "rings_9x9", _concentric_rings(9)
     yield "rings_11x11", _concentric_rings(11)
     yield "ring_6x6", _ring(6)
-    yield "spiral_11x11", _spiral(11)
-    yield "spiral_12x12", _spiral(12)
+    yield "snake_11x11", _snake(11, 11)
+    yield "snake_12x12", _snake(12, 12)
+    yield "snake_13x8", _snake(13, 8)
     yield "comb_7x9", _comb(7, 9)
 
     # Block-boundary adjacency probes: minimal pairs connecting only
