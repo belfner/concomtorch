@@ -5,11 +5,19 @@ the editable source tree. This is the brief's first hard constraint.
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 import pytest
 
-concomtorch = pytest.importorskip("concomtorch")
+if os.environ.get("CONCOMTORCH_REQUIRE_GPU", "") == "1":
+    # Gate mode: the installed repaired wheel MUST import. A plain import
+    # makes an ImportError surface as a collection error so the
+    # in-container gate exits non-zero, rather than importorskip turning a
+    # broken wheel into a skipped provenance guard and a green run.
+    import concomtorch
+else:
+    concomtorch = pytest.importorskip("concomtorch")
 
 
 def test_concomtorch_imported_from_site_packages() -> None:

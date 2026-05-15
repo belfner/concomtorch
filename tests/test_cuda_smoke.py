@@ -8,10 +8,18 @@ and tracked separately in test_correctness.py.
 
 from __future__ import annotations
 
+import os
+
 import pytest
 
 torch = pytest.importorskip("torch")
-concomtorch = pytest.importorskip("concomtorch")
+
+if os.environ.get("CONCOMTORCH_REQUIRE_GPU", "") == "1":
+    # Gate mode: the installed repaired wheel MUST import. importorskip
+    # would let an ABI-broken wheel skip this smoke test and exit green.
+    import concomtorch
+else:
+    concomtorch = pytest.importorskip("concomtorch")
 
 
 @pytest.mark.gpu
