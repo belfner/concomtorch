@@ -1,5 +1,6 @@
 #include <torch/extension.h>
 #include <ATen/ATen.h>
+#include <ATen/cuda/CUDAContext.h>
 #include <c10/cuda/CUDAGuard.h>
 #include <c10/cuda/CUDAStream.h>
 #include <cuda_runtime.h>
@@ -60,11 +61,11 @@ __device__ __forceinline__ uint8_t read_info_byte(
         return static_cast<uint8_t>(labels[xL + step_L]);
     }
     // Single-pixel block at the bottom-right corner (odd height AND odd
-    // width): no spare cell exists to store the info byte. Its only pixel
-    // is the block's top-left pixel, foreground iff the intermediate parent
-    // is not the background sentinel. The corner's only predecessor pixels
-    // (above, left, up-left) are mutually 8-adjacent, so the corner needs
-    // no deferred-union slot of its own, only this foreground bit.
+    // width): its one pixel occupies the block's only cell, so the foreground
+    // state is read directly from the sign of labels[xL] (>= 0 means the
+    // intermediate parent is a real block id, i.e. foreground). Its three
+    // predecessor pixels (above, left, up-left) are mutually 8-adjacent, so
+    // this single foreground bit is the only state the corner contributes.
     return labels[xL] >= 0 ? static_cast<uint8_t>(1) : static_cast<uint8_t>(0);
 }
 
@@ -159,17 +160,18 @@ __global__ void bke_init_kernel(
 
     // Pixel (1,1) - bottom-right
     if (y + 1 < height && x + 1 < width && input[xI + step_I + 1] > 0) {
-        // Don't modify bitset - this pixel doesn't connect to any checked neighbors
+        // Record only the info-byte foreground bit; this pixel's checked
+        // neighbors are all out of bounds here, so the bitset stays as-is.
         info_byte |= (1 << 3);
     }
 
-    // If this block has no foreground pixels, just initialize and return
-    // Check if this block has any foreground pixels
+    // Background block: all four pixels are background (info byte foreground
+    // nibble is zero). Store the background sentinel plus a zero info byte.
     if ((info_byte & 0x0F) == 0) {
         labels[xL] = kBackgroundParent;  // Background block
-        // Zero the info cell wherever it lives. The block bottom-right cell
-        // is written only in final labeling and is never read before then,
-        // so it needs no initialization here.
+        // Zero the info cell wherever it lives. Final labeling writes the
+        // block bottom-right cell, so zeroing the info cell here is the only
+        // initialization this background block needs.
         if (x + 1 < width) {
             labels[xL + 1] = 0;
         } else if (y + 1 < height) {
@@ -251,9 +253,9 @@ __global__ void bke_init_kernel(
         // Odd width, last column: store in bottom-left pixel
         labels[xL + step_L] = static_cast<int32_t>(info_byte);
     }
-    // A 1x1 bottom-right block (odd height AND odd width) has no spare cell
-    // for the info byte; read_info_byte derives its single foreground bit
-    // from the sign of labels[xL] instead, so no storage is needed here.
+    // A 1x1 bottom-right block (odd height AND odd width) keeps its single
+    // foreground bit in the sign of labels[xL]; read_info_byte derives it
+    // from there, so this block's state is already fully stored.
 }
 
 // ============================================================================
@@ -378,9 +380,9 @@ __global__ void bke_final_labeling_kernel(
     // Read the information byte
     uint8_t info_byte = read_info_byte(labels, xL, x, y, width, height, step_L);
 
-    // If no foreground pixels in this block, set all to 0. A background block
-    // has an all-zero info byte, so this also catches the kBackgroundParent
-    // sentinel without a separate label check.
+    // Background block: set all four pixels to 0. A background block has an
+    // all-zero info byte, so this single test also covers the
+    // kBackgroundParent sentinel with one label check.
     if ((info_byte & 0x0F) == 0) {
         labels[xL] = 0;
         if (x + 1 < width) {
@@ -500,7 +502,7 @@ __global__ void component_stats_kernel(
 
 torch::Tensor bke_cuda_forward(
     const torch::Tensor& input,
-    torch::Tensor labels,  // Can be empty for auto-allocation
+    torch::Tensor labels,  // Undefined triggers auto-allocation; a defined buffer is validated and written in place
     const bool inline_compress) {
 
     TORCH_CHECK(input.is_cuda(), "Input must be a CUDA tensor");
@@ -508,8 +510,8 @@ torch::Tensor bke_cuda_forward(
     TORCH_CHECK(input.scalar_type() == torch::kUInt8 || input.scalar_type() == torch::kBool,
                 "Input must be uint8 or bool");
 
-    // Bind every allocation and kernel launch to the input's device so a
-    // multi-GPU process does not run on the ambient (wrong) device.
+    // CUDAGuard binds every allocation and kernel launch in this scope to
+    // input.device(), so a multi-GPU process operates on the input's device.
     const at::cuda::CUDAGuard device_guard(input.device());
 
     auto input_cont = input.contiguous();
@@ -521,8 +523,11 @@ torch::Tensor bke_cuda_forward(
     TORCH_CHECK(height == 0 || width <= std::numeric_limits<int32_t>::max() / height,
                 "Input too large for int32 BKE labels (height * width must be < 2^31)");
 
-    // Allocate or validate labels tensor
-    if (!labels.defined() || labels.numel() == 0) {
+    // Auto-allocate only for an undefined tensor. A defined buffer is always
+    // validated and written in place, including the zero-element buffer that
+    // an empty (0-sized) image legitimately uses, preserving the in-place
+    // contract through both the Python API and direct native calls.
+    if (!labels.defined()) {
         labels = torch::empty({height, width},
                              torch::TensorOptions().dtype(torch::kInt32).device(input_cont.device()));
     } else {
@@ -554,12 +559,24 @@ torch::Tensor bke_cuda_forward(
     int64_t blocks_h = (height + 1) / 2;
 
 
-    // Configure kernel launch (2D grid, no batch dimension)
+    // Configure the 2D launch grid over 2x2 pixel blocks.
     const dim3 threads(16, 16);
     const dim3 blocks(
         (blocks_w + threads.x - 1) / threads.x,
         (blocks_h + threads.y - 1) / threads.y
     );
+
+    // The int32 pixel-count guard above still allows extreme aspect ratios
+    // (e.g. a 3,000,000 x 1 image) whose grid extent exceeds the device's
+    // per-dimension limit. Validate against maxGridSize so an oversized launch
+    // reports a clear shape error here instead of an opaque CUDA launch failure.
+    const cudaDeviceProp* props = at::cuda::getCurrentDeviceProperties();
+    TORCH_CHECK(blocks.x <= static_cast<unsigned int>(props->maxGridSize[0]) &&
+                blocks.y <= static_cast<unsigned int>(props->maxGridSize[1]),
+                "Input shape (", height, ", ", width, ") needs a CUDA grid of (",
+                blocks.x, ", ", blocks.y, ") blocks, exceeding this device's "
+                "maxGridSize (", props->maxGridSize[0], ", ", props->maxGridSize[1],
+                "). Tile the image into smaller regions before labeling.");
 
     // Launch on the caller's current stream so this op orders correctly with
     // producer/consumer work instead of racing on the legacy default stream.
