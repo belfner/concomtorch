@@ -192,6 +192,7 @@ def main() -> int:
         return 0
 
     failures: list[tuple[str, str]] = []
+    group_timings: list[tuple[str, str, int, float, bool]] = []
     active_cuda: list[str] = []
 
     if have_builds:
@@ -200,7 +201,10 @@ def main() -> int:
 
         image_failures: list[str] = []
         if not args.skip_image_warmup:
+            warmup_started = time.monotonic()
             _success, image_failures = ensure_images_parallel(active_cuda, max_parallel=max_parallel)
+            warmup_elapsed = time.monotonic() - warmup_started
+            logger.info(f'Image warmup ({len(active_cuda)} cuda variants): {warmup_elapsed:.0f}s')
             if len(image_failures) > 0:
                 logger.warning(
                     f'Image warmup failed for: {image_failures}. Groups using those variants will be skipped.'
@@ -212,7 +216,14 @@ def main() -> int:
                 failures.append((torch, cuda))
                 logger.warning(f'skipping {torch} / {cuda}: image unavailable')
                 continue
+            group_started = time.monotonic()
             ok = build_one(torch, cuda, pys, args.wheelhouse, compute_min)
+            group_elapsed = time.monotonic() - group_started
+            group_timings.append((torch, cuda, len(pys), group_elapsed, ok))
+            logger.info(
+                f'group {torch} / {cuda} ({len(pys)} py ABIs): '
+                f'{"ok" if ok else "FAILED"} in {group_elapsed:.0f}s'
+            )
             if not ok:
                 failures.append((torch, cuda))
                 logger.error(f'build/test failed for {torch} / {cuda}')
@@ -258,6 +269,18 @@ def main() -> int:
         logger.error(summary)
     else:
         logger.success(summary)
+
+    if len(group_timings) > 0:
+        rows = sorted(group_timings, key=lambda r: r[3], reverse=True)
+        table = ['Per-group build+test timing (slowest first):',
+                 'Torch   CUDA   PyABIs  Status  Seconds',
+                 '------  -----  ------  ------  -------']
+        for t, c, npy, secs, ok in rows:
+            table.append(f'{t:<6}  {c:<5}  {npy:>6}  {"ok" if ok else "FAIL":<6}  {secs:>7.0f}')
+        total_build = sum(r[3] for r in group_timings)
+        table.append('------  -----  ------  ------  -------')
+        table.append(f'sum of {len(group_timings)} groups{"":<22}{total_build:>7.0f}')
+        logger.info('\n'.join(table))
 
     if len(failures) > 0 or publish_failed:
         lines = [f'  {t} / {c}' for t, c in failures]
