@@ -1,5 +1,7 @@
 #include <torch/extension.h>
 #include <ATen/ATen.h>
+#include <c10/cuda/CUDAGuard.h>
+#include <c10/cuda/CUDAStream.h>
 #include <cuda_runtime.h>
 #include <cstdint>
 #include <limits>
@@ -421,18 +423,70 @@ __global__ void bke_final_labeling_kernel(
 // Component Mask Creation
 // ============================================================================
 
-__global__ void create_mask_kernel(
+// One grid-stride kernel produces every component mask in a single launch.
+// masks is contiguous (N, H, W) uint8, so the flat index decomposes as
+// component * num_pixels + pixel. This replaces the previous one-launch-per-
+// component loop, which scaled poorly for thousands of components.
+__global__ void create_masks_fused_kernel(
     const int32_t* __restrict__ labels,
-    uint8_t* __restrict__ mask,
+    uint8_t* __restrict__ masks,
     const int32_t* __restrict__ unique_labels,
-    const int64_t component_idx,
+    const int64_t num_components,
     const int64_t num_pixels
 ) {
-    const int32_t target_label = unique_labels[component_idx];
-    const int64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
-    if (idx >= num_pixels) return;
+    const int64_t total = num_components * num_pixels;
+    const int64_t stride = static_cast<int64_t>(gridDim.x) * blockDim.x;
+    for (int64_t idx = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+         idx < total;
+         idx += stride) {
+        const int64_t component_idx = idx / num_pixels;
+        const int64_t pixel_idx = idx % num_pixels;
+        masks[idx] = (labels[pixel_idx] == unique_labels[component_idx])
+                         ? static_cast<uint8_t>(1)
+                         : static_cast<uint8_t>(0);
+    }
+}
 
-    mask[idx] = (labels[idx] == target_label) ? 1 : 0;
+// ============================================================================
+// Component Statistics (fused single-pass kernel)
+// ============================================================================
+
+// Accumulates per-component area, bounding box, and coordinate sums in a
+// single pass over the label image. Labels passed here are dense ids in
+// [0, num_components) so each is a safe direct index into the stat arrays
+// (raw BKE labels are sparse and can approach 2^31). area/sum_x/sum_y use
+// 64-bit atomics; bbox uses 32-bit atomicMin/atomicMax.
+__global__ void component_stats_kernel(
+    const int32_t* __restrict__ dense_labels,
+    const int64_t height,
+    const int64_t width,
+    int64_t* __restrict__ area,
+    int64_t* __restrict__ sum_row,
+    int64_t* __restrict__ sum_col,
+    int32_t* __restrict__ min_row,
+    int32_t* __restrict__ max_row,
+    int32_t* __restrict__ min_col,
+    int32_t* __restrict__ max_col
+) {
+    const int64_t num_pixels = height * width;
+    const int64_t stride = static_cast<int64_t>(gridDim.x) * blockDim.x;
+    for (int64_t idx = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+         idx < num_pixels;
+         idx += stride) {
+        const int32_t comp = dense_labels[idx];
+        if (comp < 0) continue;  // defensive; dense ids are >= 0
+        const int32_t row = static_cast<int32_t>(idx / width);
+        const int32_t col = static_cast<int32_t>(idx % width);
+        atomicAdd(reinterpret_cast<unsigned long long*>(&area[comp]), 1ULL);
+        atomicAdd(reinterpret_cast<unsigned long long*>(&sum_row[comp]),
+                  static_cast<unsigned long long>(row));
+        atomicAdd(reinterpret_cast<unsigned long long*>(&sum_col[comp]),
+                  static_cast<unsigned long long>(col));
+        atomicMin(&min_row[comp], row);
+        atomicMax(&max_row[comp], row);
+        atomicMin(&min_col[comp], col);
+        atomicMax(&max_col[comp], col);
+    }
 }
 
 
@@ -450,6 +504,10 @@ torch::Tensor bke_cuda_forward(
     TORCH_CHECK(input.scalar_type() == torch::kUInt8 || input.scalar_type() == torch::kBool,
                 "Input must be uint8 or bool");
 
+    // Bind every allocation and kernel launch to the input's device so a
+    // multi-GPU process does not run on the ambient (wrong) device.
+    const at::cuda::CUDAGuard device_guard(input.device());
+
     auto input_cont = input.contiguous();
     int64_t height = input_cont.size(0);
     int64_t width = input_cont.size(1);
@@ -466,8 +524,14 @@ torch::Tensor bke_cuda_forward(
     } else {
         TORCH_CHECK(labels.is_cuda(), "Labels must be on CUDA device");
         TORCH_CHECK(labels.dtype() == torch::kInt32, "Labels must be int32");
+        TORCH_CHECK(labels.device() == input.device(),
+                   "Labels buffer device mismatch: input is on ", input.device(),
+                   " but labels buffer is on ", labels.device(),
+                   ". The buffer and input must be on the same CUDA device.");
         TORCH_CHECK(labels.dim() == 2 && labels.size(0) == height && labels.size(1) == width,
-                   "Labels shape mismatch");
+                   "Labels buffer shape mismatch: expected (", height, ", ", width,
+                   ") to match input on ", input.device(),
+                   ", got ", labels.sizes(), " on ", labels.device());
         TORCH_CHECK(labels.is_contiguous(),
                    "Preallocated labels buffer must be contiguous "
                    "(it is written in place)");
@@ -493,11 +557,15 @@ torch::Tensor bke_cuda_forward(
         (blocks_h + threads.y - 1) / threads.y
     );
 
+    // Launch on the caller's current stream so this op orders correctly with
+    // producer/consumer work instead of racing on the legacy default stream.
+    const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
+
     // BKE Algorithm: 5 kernels following the paper
 
     // Kernel 1: Initialization (build BitSet, link to minimum neighbor, mark deferred unions)
     AT_DISPATCH_INTEGRAL_TYPES_AND(at::ScalarType::Bool, input_cont.scalar_type(), "bke_init_kernel", [&] {
-        bke_init_kernel<scalar_t><<<blocks, threads>>>(
+        bke_init_kernel<scalar_t><<<blocks, threads, 0, stream>>>(
             input_cont.data_ptr<scalar_t>(),
             labels.data_ptr<int32_t>(),
             height, width,
@@ -509,7 +577,7 @@ torch::Tensor bke_cuda_forward(
     TORCH_CHECK(err == cudaSuccess, "BKE init kernel failed: ", cudaGetErrorString(err));
 
     // Kernel 2: First Compression
-    bke_compress_kernel<<<blocks, threads>>>(
+    bke_compress_kernel<<<blocks, threads, 0, stream>>>(
         labels.data_ptr<int32_t>(),
         height, width, step_L,
         inline_compress
@@ -519,7 +587,7 @@ torch::Tensor bke_cuda_forward(
     TORCH_CHECK(err == cudaSuccess, "BKE compress kernel #1 failed: ", cudaGetErrorString(err));
 
     // Kernel 3: Reduction (perform deferred unions)
-    bke_reduction_kernel<<<blocks, threads>>>(
+    bke_reduction_kernel<<<blocks, threads, 0, stream>>>(
         labels.data_ptr<int32_t>(),
         height, width, step_L
     );
@@ -528,7 +596,7 @@ torch::Tensor bke_cuda_forward(
     TORCH_CHECK(err == cudaSuccess, "BKE reduction kernel failed: ", cudaGetErrorString(err));
 
     // Kernel 4: Second Compression (flatten trees after reduction)
-    bke_compress_kernel<<<blocks, threads>>>(
+    bke_compress_kernel<<<blocks, threads, 0, stream>>>(
         labels.data_ptr<int32_t>(),
         height, width, step_L,
         inline_compress
@@ -538,7 +606,7 @@ torch::Tensor bke_cuda_forward(
     TORCH_CHECK(err == cudaSuccess, "BKE compress kernel #2 failed: ", cudaGetErrorString(err));
 
     // Kernel 5: Final Labeling (copy block labels to pixels)
-    bke_final_labeling_kernel<<<blocks, threads>>>(
+    bke_final_labeling_kernel<<<blocks, threads, 0, stream>>>(
         labels.data_ptr<int32_t>(),
         height, width, step_L
     );
@@ -580,6 +648,8 @@ torch::Tensor get_unique_labels_cuda(
     TORCH_CHECK(labels.dim() == 2, "Labels must be 2D (height, width)");
     TORCH_CHECK(labels.scalar_type() == torch::kInt32, "Labels must be int32");
 
+    const at::cuda::CUDAGuard device_guard(labels.device());
+
     auto labels_cont = labels.contiguous();
 
     torch::Tensor unique_labels_gpu;
@@ -605,12 +675,11 @@ torch::Tensor get_unique_labels_cuda(
         unique_labels_gpu = std::get<0>(unique_result);
     }
 
-    // Filter background if needed
+    // Filter background if needed. CCL labels are non-negative (0 is the
+    // only background value), so a GPU-side != 0 mask drops exactly the
+    // background entry without copying a scalar to the host.
     if (exclude_background && unique_labels_gpu.size(0) > 0) {
-        auto first_label = unique_labels_gpu[0].item<int32_t>();
-        if (first_label == 0) {
-            unique_labels_gpu = unique_labels_gpu.slice(0, 1, unique_labels_gpu.size(0));
-        }
+        unique_labels_gpu = unique_labels_gpu.masked_select(unique_labels_gpu != 0);
     }
 
     return unique_labels_gpu;
@@ -632,6 +701,8 @@ torch::Tensor get_component_masks_cuda(
     TORCH_CHECK(labels.dim() == 2, "Labels must be 2D (height, width)");
     TORCH_CHECK(labels.scalar_type() == torch::kInt32, "Labels must be int32");
 
+    const at::cuda::CUDAGuard device_guard(labels.device());
+
     auto labels_cont = labels.contiguous();
     const int64_t height = labels_cont.size(0);
     const int64_t width = labels_cont.size(1);
@@ -648,6 +719,9 @@ torch::Tensor get_component_masks_cuda(
         TORCH_CHECK(unique_labels_tensor.is_cuda(), "unique_labels must be a CUDA tensor");
         TORCH_CHECK(unique_labels_tensor.dim() == 1, "unique_labels must be 1D");
         TORCH_CHECK(unique_labels_tensor.scalar_type() == torch::kInt32, "unique_labels must be int32");
+        TORCH_CHECK(unique_labels_tensor.device() == labels.device(),
+                    "unique_labels device mismatch: labels are on ", labels.device(),
+                    " but unique_labels is on ", unique_labels_tensor.device());
 
         unique_labels_gpu = unique_labels_tensor.contiguous();
     } else {
@@ -670,27 +744,108 @@ torch::Tensor get_component_masks_cuda(
             torch::TensorOptions().dtype(torch::kUInt8).device(labels_cont.device()));
     }
 
-    // Allocate output tensor: (N, H, W) uint8
-    auto masks = torch::zeros({num_components, height, width},
+    // Allocate output tensor: (N, H, W) uint8. The fused kernel writes every
+    // element, so an uninitialized buffer is safe and avoids a memset.
+    auto masks = torch::empty({num_components, height, width},
         torch::TensorOptions().dtype(torch::kUInt8).device(labels_cont.device()));
 
-    // Launch kernel for each component
+    // One fused launch over all N*H*W mask elements (grid-stride), instead of
+    // one kernel launch per component.
+    const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
     const int threads_per_block = 256;
-    const int num_blocks = (num_pixels + threads_per_block - 1) / threads_per_block;
-    const int32_t* unique_ptr = unique_labels_gpu.data_ptr<int32_t>();
-
-    for (int64_t i = 0; i < num_components; i++) {
-        create_mask_kernel<<<num_blocks, threads_per_block>>>(
-            labels_cont.data_ptr<int32_t>(),
-            masks[i].data_ptr<uint8_t>(),
-            unique_ptr,
-            i,
-            num_pixels
-        );
+    const int64_t total = num_components * num_pixels;
+    int64_t num_blocks = (total + threads_per_block - 1) / threads_per_block;
+    if (num_blocks > 65535) {
+        num_blocks = 65535;  // grid-stride loop covers the remainder
     }
+
+    create_masks_fused_kernel<<<num_blocks, threads_per_block, 0, stream>>>(
+        labels_cont.data_ptr<int32_t>(),
+        masks.data_ptr<uint8_t>(),
+        unique_labels_gpu.data_ptr<int32_t>(),
+        num_components,
+        num_pixels
+    );
 
     cudaError_t err = cudaGetLastError();
     TORCH_CHECK(err == cudaSuccess, "Mask creation failed: ", cudaGetErrorString(err));
 
     return masks;
+}
+
+
+// ============================================================================
+// Component Statistics
+// ============================================================================
+
+// Computes per-component area, bounding box, and centroid in a single pass
+// over the label image. dense_labels must hold contiguous ids in
+// [0, num_components) (the Python wrapper relabels first), so each value
+// directly indexes the per-component accumulators.
+//
+// Returns a 3-tuple:
+//   area     : int64  (N,)      pixel count per component
+//   bbox     : int32  (N, 4)    [min_row, min_col, max_row, max_col] inclusive
+//   centroid : float64 (N, 2)   [row, col] = coordinate mean
+std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> component_stats_cuda(
+    const torch::Tensor& dense_labels,
+    const int64_t num_components
+) {
+    TORCH_CHECK(dense_labels.is_cuda(), "dense_labels must be a CUDA tensor");
+    TORCH_CHECK(dense_labels.dim() == 2, "dense_labels must be 2D (height, width)");
+    TORCH_CHECK(dense_labels.scalar_type() == torch::kInt32, "dense_labels must be int32");
+    TORCH_CHECK(num_components >= 0, "num_components must be non-negative");
+
+    const at::cuda::CUDAGuard device_guard(dense_labels.device());
+
+    auto labels_cont = dense_labels.contiguous();
+    const int64_t height = labels_cont.size(0);
+    const int64_t width = labels_cont.size(1);
+    const auto device = labels_cont.device();
+
+    auto i64_opts = torch::TensorOptions().dtype(torch::kInt64).device(device);
+    auto i32_opts = torch::TensorOptions().dtype(torch::kInt32).device(device);
+    auto f64_opts = torch::TensorOptions().dtype(torch::kFloat64).device(device);
+
+    auto area = torch::zeros({num_components}, i64_opts);
+    auto sum_row = torch::zeros({num_components}, i64_opts);
+    auto sum_col = torch::zeros({num_components}, i64_opts);
+    auto min_row = torch::full({num_components}, std::numeric_limits<int32_t>::max(), i32_opts);
+    auto max_row = torch::full({num_components}, -1, i32_opts);
+    auto min_col = torch::full({num_components}, std::numeric_limits<int32_t>::max(), i32_opts);
+    auto max_col = torch::full({num_components}, -1, i32_opts);
+
+    const int64_t num_pixels = height * width;
+    if (num_components > 0 && num_pixels > 0) {
+        const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
+        const int threads_per_block = 256;
+        int64_t num_blocks = (num_pixels + threads_per_block - 1) / threads_per_block;
+        if (num_blocks > 65535) {
+            num_blocks = 65535;  // grid-stride loop covers the remainder
+        }
+        component_stats_kernel<<<num_blocks, threads_per_block, 0, stream>>>(
+            labels_cont.data_ptr<int32_t>(),
+            height, width,
+            area.data_ptr<int64_t>(),
+            sum_row.data_ptr<int64_t>(),
+            sum_col.data_ptr<int64_t>(),
+            min_row.data_ptr<int32_t>(),
+            max_row.data_ptr<int32_t>(),
+            min_col.data_ptr<int32_t>(),
+            max_col.data_ptr<int32_t>()
+        );
+        cudaError_t err = cudaGetLastError();
+        TORCH_CHECK(err == cudaSuccess, "Component stats failed: ", cudaGetErrorString(err));
+    }
+
+    auto bbox = torch::stack({min_row, min_col, max_row, max_col}, 1);
+
+    // Centroid = coordinate sum / area. Clamp the denominator so a component
+    // with zero pixels yields 0 rather than inf/nan (defensive; dense ids
+    // derived from present labels always have area >= 1).
+    auto area_f = area.to(torch::kFloat64).clamp_min(1.0);
+    auto centroid = torch::stack(
+        {sum_row.to(torch::kFloat64) / area_f, sum_col.to(torch::kFloat64) / area_f}, 1);
+
+    return std::make_tuple(area, bbox, centroid);
 }

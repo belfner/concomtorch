@@ -1,10 +1,13 @@
 #include <torch/extension.h>
 
+#include <tuple>
+
 // Forward declarations from bke_kernels.cu
 torch::Tensor bke_std_cuda_forward(const torch::Tensor& input, std::optional<torch::Tensor> labels);
 torch::Tensor bke_ic_cuda_forward(const torch::Tensor& input, std::optional<torch::Tensor> labels);
 torch::Tensor get_unique_labels_cuda(const torch::Tensor& labels, bool exclude_background, bool collapse_consecutive);
 torch::Tensor get_component_masks_cuda(const torch::Tensor& labels, std::optional<torch::Tensor> unique_labels, bool exclude_background, bool collapse_consecutive);
+std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> component_stats_cuda(const torch::Tensor& dense_labels, int64_t num_components);
 
 // Register the operators with PyTorch dispatcher
 TORCH_LIBRARY(concomtorch, m) {
@@ -20,6 +23,9 @@ TORCH_LIBRARY(concomtorch, m) {
 
     // Component mask extraction
     m.def("get_component_masks(Tensor labels, Tensor? unique_labels=None, bool exclude_background=True, bool collapse_consecutive=True) -> Tensor");
+
+    // Per-component statistics (area, bbox, centroid) over dense ids
+    m.def("component_stats(Tensor dense_labels, int num_components) -> (Tensor, Tensor, Tensor)");
 }
 
 // Register CUDA implementations (BKE only)
@@ -30,4 +36,5 @@ TORCH_LIBRARY_IMPL(concomtorch, CUDA, m) {
     m.impl("connected_components_bke_ic",  &bke_ic_cuda_forward);
     m.impl("get_unique_labels",            &get_unique_labels_cuda);
     m.impl("get_component_masks",          &get_component_masks_cuda);
+    m.impl("component_stats",              &component_stats_cuda);
 }
