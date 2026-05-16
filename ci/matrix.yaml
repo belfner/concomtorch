@@ -12,6 +12,13 @@ torch_min: '2.6.0'
 # selected torch version at or above this is included.
 python_min: '3.10'
 
+# Lowest CUDA compute capability (SM) to emit device code for. At wheel build
+# time package/setup.py queries `nvcc --list-gpu-code`, keeps every SM at or
+# above this floor, sorts ascending, and auto-populates TORCH_CUDA_ARCH_LIST
+# (plus a PTX fallback for the highest arch). 7.5 is Turing (Tesla T4 / RTX 20
+# series); the floor also tracks per-toolkit drops automatically.
+compute_min: '7.5'
+
 # Docker image pool tuning.
 # max_parallel_builds caps concurrent `docker build` invocations during warmup.
 # max_resident_images caps how many manylinux+CUDA images may live on disk at once.

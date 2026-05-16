@@ -92,7 +92,7 @@ def load_matrix(path: Path) -> dict:
     """
     with path.open() as fh:
         data = yaml.safe_load(fh)
-    required = {'torch_min', 'python_min'}
+    required = {'torch_min', 'python_min', 'compute_min'}
     missing = required - set(data.keys())
     if len(missing) > 0:
         raise ValueError(f'matrix.yaml missing required keys: {sorted(missing)}')

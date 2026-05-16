@@ -91,7 +91,13 @@ def render_plan_table(groups: list[tuple[str, str, list[str]]]) -> str:
     return '\n'.join(lines)
 
 
-def build_one(torch_version: str, cuda_variant: str, py_abis: list[str], output_dir: Path) -> bool:
+def build_one(
+    torch_version: str,
+    cuda_variant: str,
+    py_abis: list[str],
+    output_dir: Path,
+    compute_min: str,
+) -> bool:
     """
     Invoke ci/build_wheel.py for a single (torch, cuda) group. Returns True on success.
     """
@@ -100,6 +106,7 @@ def build_one(torch_version: str, cuda_variant: str, py_abis: list[str], output_
         '--torch', torch_version,
         '--cuda', cuda_variant,
         '--py', *py_abis,
+        '--compute-min', compute_min,
         '--project-dir', str(REPO_ROOT / 'package'),
         '--output-dir', str(output_dir),
     ]
@@ -151,6 +158,7 @@ def main() -> int:
     docker_cfg = matrix.get('docker', {})
     max_parallel = int(docker_cfg.get('max_parallel_builds', 2))
     max_resident = int(docker_cfg.get('max_resident_images', 3))
+    compute_min = str(matrix['compute_min'])
 
     catalog = fetch_catalog()
     wanted = enumerate_wanted(matrix, catalog)
@@ -187,7 +195,7 @@ def main() -> int:
             failures.append((torch, cuda))
             print(f'  - skipping {torch} / {cuda}: image unavailable', flush=True)
             continue
-        ok = build_one(torch, cuda, pys, args.wheelhouse)
+        ok = build_one(torch, cuda, pys, args.wheelhouse, compute_min)
         if not ok:
             failures.append((torch, cuda))
             print(f'  ! build failed for {torch} / {cuda}', flush=True)

@@ -60,6 +60,9 @@ def parse_args() -> argparse.Namespace:
                    help='CUDA variant matching PyTorch wheel channel, e.g. cu121')
     p.add_argument('--py', dest='py_abis', nargs='+', required=True,
                    help='One or more CPython ABI tags to build, e.g. cp310 cp311 cp312')
+    p.add_argument('--compute-min', dest='compute_min', default='7.5',
+                   help='Lowest CUDA compute capability (SM) setup.py emits device code for, '
+                        'e.g. 7.5. Passed to the build as CONCOMTORCH_COMPUTE_MIN.')
     p.add_argument('--project-dir', dest='project_dir', default='.',
                    help='Path to the project directory.')
     p.add_argument('--output-dir', dest='output_dir', default='wheelhouse',
@@ -122,6 +125,7 @@ def main() -> int:
             f'LD_LIBRARY_PATH=/usr/local/cuda-{cuda_major_minor}/lib64:$LD_LIBRARY_PATH '
             f'CONCOMTORCH_CUDA={args.cuda_variant} '
             f'CONCOMTORCH_TORCH={args.torch_version} '
+            f'CONCOMTORCH_COMPUTE_MIN={args.compute_min} '
             'AUDITWHEEL_PLAT="manylinux_2_28_x86_64"'
         ),
         'CIBW_BUILD_VERBOSITY': '2',
