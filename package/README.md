@@ -161,7 +161,7 @@ stats.centroid  # float64 (N,2) [row, col]
 ```python
 from concomtorch import get_component_masks
 
-masks = get_component_masks(labels)      # bool (N, H, W), one plane per component
+masks = get_component_masks(labels)      # uint8 (N, H, W), values 0/1, one plane per component
 ```
 
 ### Reusable labeler helper
@@ -231,9 +231,9 @@ sync). `collapse_consecutive=True` first applies
 labels form long contiguous runs (typical CCL output) and adds a redundant pass
 for scattered/noisy label fields.
 
-### `get_component_masks(labels, exclude_background=True, collapse_consecutive=True, unique_labels=None)`
+### `get_component_masks(labels, unique_labels=None, exclude_background=True, collapse_consecutive=True)`
 
-Boolean masks, shape `(N, H, W)`, one plane per component, produced by a single
+`uint8` masks (values `0`/`1`), shape `(N, H, W)`, one plane per component, produced by a single
 fused grid-stride kernel. Memory is dense: `N * H * W` bytes regardless of
 component size. This beats a `(max_label + 1, H, W)` one-hot only when labels
 are sparse; for many components it can be large. Passing `unique_labels`
