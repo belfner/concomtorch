@@ -157,12 +157,21 @@ def dockerfile_text(cuda_variant: str, manylinux_image: str = DEFAULT_MANYLINUX_
 
     The host GCC that nvcc accepts is a property of the installed CUDA toolkit,
     encoded in ``$CUDA_HOME/include/crt/host_config.h`` as the ``#if __GNUC__ > N``
-    guard. The toolkit is installed first, the cap ``N`` is read from that header,
-    and the highest ``gcc-toolset-K`` (``K`` from the cap down to 9) that the RHEL8
-    repos offer is installed and exposed through a stable
-    ``/opt/rh/gcc-toolset-active`` symlink. A final layer compiles a trivial CUDA
-    translation unit with that toolset so an unusable pairing fails the image build
-    rather than every wheel build.
+    guard. The toolkit is installed first and the cap ``N`` is read from that
+    header. The installed toolset is then clamped one major below that cap
+    (``start = N - 1``, floored at 9): ``torch.utils.cpp_extension`` layers its
+    own internal CUDA-version -> max-g++ table on top of nvcc's check, and that
+    table is stricter and version-dependent (e.g. torch 2.11.0's bundled CUDA
+    12.8 caps g++ at < 14 while the system CUDA 12.8 ``host_config.h`` permits
+    g++ 14). The installed torch is not known at image-build time, so building
+    one major below the system cap keeps the toolset inside both nvcc's real
+    constraint and torch's stricter table across the supported torch range,
+    while staying well above torch's g++ minimum of 6.0. The highest
+    ``gcc-toolset-K`` (``K`` from ``start`` down to 9) that the RHEL8 repos offer
+    is installed and exposed through a stable ``/opt/rh/gcc-toolset-active``
+    symlink. A final layer compiles a trivial CUDA translation unit with that
+    toolset so an unusable pairing fails the image build rather than every wheel
+    build.
 
     Every ``yum``/``dnf`` install runs against a BuildKit cache mount at
     ``/var/cache/dnf`` (the AlmaLinux 8 dnf cache directory) with
@@ -203,11 +212,13 @@ ENV PATH=$CUDA_HOME/bin:$PATH
 RUN --mount=type=cache,target=/var/cache/dnf,sharing=locked \\
     cap="$(grep -oP '__GNUC__ > \\K[0-9]+' "$CUDA_HOME/include/crt/host_config.h" | head -n1)" && \\
     if [ -z "$cap" ]; then echo "could not read GCC cap from host_config.h" >&2; exit 1; fi && \\
+    start=$((cap - 1)) && \\
+    if [ "$start" -lt 9 ]; then start=9; fi && \\
     chosen="" && \\
-    for n in $(seq "$cap" -1 9); do \\
+    for n in $(seq "$start" -1 9); do \\
         if yum -y --setopt=keepcache=1 install "gcc-toolset-$n-gcc" "gcc-toolset-$n-gcc-c++" "gcc-toolset-$n-binutils"; then chosen="$n"; break; fi; \\
     done && \\
-    if [ -z "$chosen" ]; then echo "no gcc-toolset at or below GCC $cap is available" >&2; exit 1; fi && \\
+    if [ -z "$chosen" ]; then echo "no gcc-toolset at or below GCC $start (system cap $cap minus one) is available" >&2; exit 1; fi && \\
     ln -s "/opt/rh/gcc-toolset-$chosen" /opt/rh/gcc-toolset-active
 
 ENV PATH=/opt/rh/gcc-toolset-active/root/usr/bin:$PATH
