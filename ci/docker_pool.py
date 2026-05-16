@@ -164,6 +164,14 @@ def dockerfile_text(cuda_variant: str, manylinux_image: str = DEFAULT_MANYLINUX_
     translation unit with that toolset so an unusable pairing fails the image build
     rather than every wheel build.
 
+    Every ``yum``/``dnf`` install runs against a BuildKit cache mount at
+    ``/var/cache/dnf`` (the AlmaLinux 8 dnf cache directory) with
+    ``--setopt=keepcache=1`` so downloaded RPMs survive across rebuilds and are
+    deduplicated across the variants ``ensure_images_parallel`` builds
+    concurrently. ``sharing=locked`` serializes writers to the shared cache. The
+    cache mount is not committed to the image, so layers stay slim without an
+    explicit ``yum clean all``.
+
     Parameters
     ----------
     cuda_variant : str
@@ -182,25 +190,25 @@ def dockerfile_text(cuda_variant: str, manylinux_image: str = DEFAULT_MANYLINUX_
 ARG BASE_IMAGE={manylinux_image}
 FROM ${{BASE_IMAGE}}
 
-RUN yum -y install dnf-plugins-core curl git && \\
-    yum -y config-manager --add-repo https://developer.download.nvidia.com/compute/cuda/repos/rhel8/x86_64/cuda-rhel8.repo && \\
-    yum -y clean all && rm -rf /var/cache/yum
+RUN --mount=type=cache,target=/var/cache/dnf,sharing=locked \\
+    yum -y --setopt=keepcache=1 install dnf-plugins-core curl git && \\
+    yum -y config-manager --add-repo https://developer.download.nvidia.com/compute/cuda/repos/rhel8/x86_64/cuda-rhel8.repo
 
-RUN yum -y install cuda-toolkit-{cuda_pkg_suffix} && \\
-    yum -y clean all && rm -rf /var/cache/yum
+RUN --mount=type=cache,target=/var/cache/dnf,sharing=locked \\
+    yum -y --setopt=keepcache=1 install cuda-toolkit-{cuda_pkg_suffix}
 
 ENV CUDA_HOME=/usr/local/cuda-{cuda_major_minor}
 ENV PATH=$CUDA_HOME/bin:$PATH
 
-RUN cap="$(grep -oP '__GNUC__ > \\K[0-9]+' "$CUDA_HOME/include/crt/host_config.h" | head -n1)" && \\
+RUN --mount=type=cache,target=/var/cache/dnf,sharing=locked \\
+    cap="$(grep -oP '__GNUC__ > \\K[0-9]+' "$CUDA_HOME/include/crt/host_config.h" | head -n1)" && \\
     if [ -z "$cap" ]; then echo "could not read GCC cap from host_config.h" >&2; exit 1; fi && \\
     chosen="" && \\
     for n in $(seq "$cap" -1 9); do \\
-        if yum -y install "gcc-toolset-$n-gcc" "gcc-toolset-$n-gcc-c++" "gcc-toolset-$n-binutils"; then chosen="$n"; break; fi; \\
+        if yum -y --setopt=keepcache=1 install "gcc-toolset-$n-gcc" "gcc-toolset-$n-gcc-c++" "gcc-toolset-$n-binutils"; then chosen="$n"; break; fi; \\
     done && \\
     if [ -z "$chosen" ]; then echo "no gcc-toolset at or below GCC $cap is available" >&2; exit 1; fi && \\
-    ln -s "/opt/rh/gcc-toolset-$chosen" /opt/rh/gcc-toolset-active && \\
-    yum -y clean all && rm -rf /var/cache/yum
+    ln -s "/opt/rh/gcc-toolset-$chosen" /opt/rh/gcc-toolset-active
 
 ENV PATH=/opt/rh/gcc-toolset-active/root/usr/bin:$PATH
 ENV LD_LIBRARY_PATH=/opt/rh/gcc-toolset-active/root/usr/lib64:/opt/rh/gcc-toolset-active/root/usr/lib:$LD_LIBRARY_PATH
