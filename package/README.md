@@ -248,8 +248,11 @@ Pure-torch remap of sparse IDs to a contiguous range, fully on-device. With
 
 ### `component_stats(labels) -> ComponentStats`
 
-Per-component area, bounding box, and centroid via a single fused CUDA kernel
-(one DRAM pass). Returns a `ComponentStats` dataclass:
+Per-component area, bounding box, and centroid. The label map is densified
+on GPU (a `get_unique_labels` reduction plus a `searchsorted` gather into a
+temporary `(H, W)` id map), then a single fused CUDA kernel accumulates all
+three statistics in one DRAM pass over that id map via per-component atomics.
+Returns a `ComponentStats` dataclass:
 
 - `labels` `int32 (N,)` original IDs ascending
 - `area` `int64 (N,)` pixel counts
@@ -319,8 +322,9 @@ the output tensor to avoid extra allocations. The 2x2 block structure makes
   with long equal-label runs; benchmark against `False` if your label field is
   scattered or noisy.
 - **`bke_ic`** (default) is generally the better 2D variant.
-- **`component_stats` / `get_component_masks`** are single fused kernels; for
-  thousands of components the dense `(N, H, W)` mask memory dominates, so
+- **`component_stats`** runs a GPU densification step then one fused
+  accumulation kernel; **`get_component_masks`** is a single fused kernel but
+  for thousands of components the dense `(N, H, W)` mask memory dominates, so
   prefer `component_stats` when you only need area/bbox/centroid.
 
 ### Measuring on your workload

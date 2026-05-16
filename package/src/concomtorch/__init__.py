@@ -246,7 +246,11 @@ def create_labels_buffer(
         If ``shape`` is not a 2-tuple of non-negative ints, or ``device`` is
         not a CUDA device.
     """
-    if len(shape) != 2 or not all(isinstance(s, int) and s >= 0 for s in shape):
+    if (
+        not isinstance(shape, (tuple, list, torch.Size))
+        or len(shape) != 2
+        or not all(isinstance(s, int) and s >= 0 for s in shape)
+    ):
         raise ValueError(f"shape must be a 2-tuple (H, W) of non-negative ints, got {shape!r}")
     dev = torch.device(device)
     if dev.type != "cuda":
@@ -393,8 +397,9 @@ def relabel_components(labels: torch.Tensor, dense: bool = True) -> torch.Tensor
     Returns
     -------
     torch.Tensor
-        int32 CUDA tensor of shape (H, W). Background is 0; components are
-        ``1..N``.
+        int32 CUDA tensor of shape (H, W). When ``dense=True``, background is
+        0 and components are ``1..N``. When ``dense=False``, an unchanged copy
+        of ``labels`` (still sparse) is returned.
 
     Raises
     ------
@@ -444,11 +449,16 @@ class ComponentStats:
 
 def component_stats(labels: torch.Tensor) -> ComponentStats:
     """
-    Compute per-component area, bounding box, and centroid in one GPU pass.
+    Compute per-component area, bounding box, and centroid on the GPU.
 
-    Background (label 0) is excluded. The label map is densely relabeled so a
-    single fused kernel can index per-component accumulators safely, then the
-    stats are mapped back to the original sparse label values.
+    Background (label 0) is excluded. The label map is first densified on GPU
+    (a ``get_unique_labels`` reduction plus a ``searchsorted`` gather into a
+    temporary ``(H, W)`` int32 id map) so that a single fused CUDA kernel can
+    then accumulate area, bbox, and centroid sums in one DRAM pass over that
+    id map using per-component atomics. Results are mapped back to the
+    original sparse label values. Atomic accumulation serializes when a few
+    components dominate the image; it is efficient for the typical
+    many-component CCL case.
 
     Parameters
     ----------
