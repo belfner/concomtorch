@@ -38,3 +38,9 @@ Thumbs.db
 
 # CI orchestration logs (loguru rotating sinks from ci/logging_setup.py)
 /logs/
+
+# CI publish artifacts: ci/run.py --serve-root defaults to ./public (local
+# mode wheel tree); ci/release.py --pages-dir defaults to ./pages (gh-pages
+# staging tree)
+/public/
+/pages/

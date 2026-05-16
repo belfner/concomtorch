@@ -1,8 +1,9 @@
 # concomtorch CI
 
-Self-hosted wheel build automation. Lives on one server, runs once a day, builds every
-(torch, cuda, py) combination PyTorch publishes at or above the floors in `matrix.yaml`
-that is not yet in the wheelhouse. Wheels carry PEP 440 local versions (`+cu126torch2.6.1`) and are published behind
+Self-hosted wheel build automation. Lives on one server, runs once a day. `detect.py`
+enumerates every (torch, cuda, py) combination PyTorch publishes at or above the floors
+in `matrix.yaml`; `plan.py` narrows that to the latest patch of each torch minor per
+(cuda, py) bucket and builds whatever is not yet in the wheelhouse. Wheels carry PEP 440 local versions (`+cu126torch2.6.1`) and are published behind
 a two-layer PEP 503 simple index keyed by cuda variant then torch minor
 (`<cuda>/<torch_tag>/`, e.g. `cu126/torch2_6/`) that pip consumes via `--extra-index-url`.
 The user selects the cuda variant and torch minor matching their installed PyTorch and passes

@@ -66,7 +66,7 @@ pip install -e ./package
 ```
 
 The build locates `nvcc` at `$CUDA_HOME/bin/nvcc` when `CUDA_HOME` is set,
-otherwise on `PATH`; finding it compiles the CUDA extension. When the toolkit
+falling back to `PATH`; finding it compiles the CUDA extension. When the toolkit
 is absent the build produces a Python-only package: `import concomtorch` still
 succeeds, and the missing-extension error surfaces on the first operator call.
 

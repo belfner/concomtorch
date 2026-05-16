@@ -4,6 +4,7 @@ version = "0.0.0"
 description = "Build, publish, and orchestration tooling for the concomtorch wheel matrix. The wheel itself lives under ./package."
 requires-python = ">=3.13"
 dependencies = [
+    "packaging>=21.0",
     "pyyaml>=6.0",
     "torch-wheel-index>=0.2.0",
     "cibuildwheel>=3.1,<4",
