@@ -32,6 +32,9 @@ def _ensure_extension() -> None:
     ------
     RuntimeError
         If the compiled ``concomtorch._C`` extension cannot be located.
+    OSError
+        If the extension is located but its shared library fails to load
+        (for example a wheel built for a different CUDA or torch version).
     """
     global _EXTENSION_LOADED
     if _EXTENSION_LOADED:
@@ -208,9 +211,8 @@ def connected_components(
     -------
     torch.Tensor
         int32 CUDA tensor of shape (H, W). Background is 0; component labels
-        are positive int32 values. Labels are **not** guaranteed to be dense
-        or sequential (they derive from each component's root raster index).
-        Use :func:`relabel_components` for dense 1..N ids.
+        are arbitrary positive int32 values, each derived from its component's
+        root raster index. Use :func:`relabel_components` for dense 1..N ids.
 
     Raises
     ------
@@ -277,7 +279,7 @@ def create_labels_buffer(
     if (
         not isinstance(shape, (tuple, list, torch.Size))
         or len(shape) != 2
-        or not all(isinstance(s, int) and s >= 0 for s in shape)
+        or not all(isinstance(s, int) and not isinstance(s, bool) and s >= 0 for s in shape)
     ):
         raise ValueError(f"shape must be a 2-tuple (H, W) of non-negative ints, got {shape!r}")
     dev = torch.device(device)
@@ -395,7 +397,7 @@ def get_component_masks(
             raise ValueError(f"unique_labels must be int32, got {unique_labels.dtype}")
         if unique_labels.dim() != 1:
             raise ValueError(f"unique_labels must be 1D, got shape {tuple(unique_labels.shape)}")
-        if unique_labels.device != labels.device:
+        if not _same_cuda_device(unique_labels.device, labels.device):
             raise ValueError(
                 f"unique_labels device {unique_labels.device} does not match labels device {labels.device}"
             )
@@ -409,8 +411,8 @@ def relabel_components(labels: torch.Tensor, dense: bool = True) -> torch.Tensor
 
     :func:`connected_components` returns positive but sparse labels. This maps
     them to ``1, 2, ..., N`` (background stays 0), entirely on GPU via
-    ``torch.unique(..., return_inverse=True)`` (a single sort/dedup/scatter;
-    no custom kernel is faster for arbitrary sparse ids).
+    ``torch.unique(..., return_inverse=True)``: a single fused
+    sort/dedup/scatter pass.
 
     Parameters
     ----------
@@ -445,7 +447,10 @@ def relabel_components(labels: torch.Tensor, dense: bool = True) -> torch.Tensor
         # correct. If absent, shift by 1 so 0 stays reserved for background.
         bg_present = unique[0] == 0
         relabeled = relabeled + (~bg_present).to(torch.int32)
-    return relabeled.view_as(labels)
+    relabeled = relabeled.view_as(labels)
+    # Background is always 0 by contract, so input zeros stay 0 even when the
+    # value set (e.g. negative labels alongside 0) shifts the numbering.
+    return torch.where(labels == 0, torch.zeros_like(relabeled), relabeled)
 
 
 @dataclass
@@ -511,7 +516,6 @@ def component_stats(labels: torch.Tensor) -> ComponentStats:
 
     unique = get_unique_labels(labels, exclude_background=True)
     num_components = unique.numel()
-    height, width = labels.shape
 
     if num_components == 0:
         return ComponentStats(
@@ -574,9 +578,12 @@ def _register_fake_kernels() -> None:
 try:
     _ensure_extension()
     _register_fake_kernels()
-except RuntimeError:
-    # Extension unavailable (e.g. source build without a CUDA toolkit).
-    # Import still succeeds; the precise error is raised on first op use.
+except (RuntimeError, OSError):
+    # Best-effort import: a missing extension (RuntimeError, e.g. a source
+    # build without a CUDA toolkit) or a located-but-unloadable extension
+    # (OSError, e.g. a wheel built for a different CUDA/torch version) leaves
+    # _EXTENSION_LOADED False. Import still succeeds; the precise error is
+    # raised on first op use.
     pass
 
 
@@ -603,12 +610,12 @@ class ConnectedComponentsLabeler:
     """
     Reusable fixed-size connected-component labeler.
 
-    Preallocates one int32 output buffer for a fixed (H, W) and device. This
-    instance is **not** thread- or stream-safe: the single shared buffer is
-    overwritten on every call, so concurrent calls from multiple threads,
-    CUDA streams, or overlapping async work race. Use one instance per
-    thread/stream/in-flight operation. The returned tensor aliases the shared
-    buffer; clone a result you need to retain across calls.
+    Preallocates one int32 output buffer for a fixed (H, W) and device. The
+    instance owns this single mutable buffer and overwrites it on every call,
+    so concurrent calls from multiple threads, CUDA streams, or overlapping
+    async work race on it. Use one instance per thread/stream/in-flight
+    operation. The returned tensor aliases the shared buffer; clone a result
+    you need to retain across calls.
 
     Parameters
     ----------
@@ -632,10 +639,10 @@ class ConnectedComponentsLabeler:
     def __init__(self, image_size: tuple[int, int], device: torch.device | str = "cuda", algorithm: str = "bke_ic"):
         if algorithm not in ("bke_ic", "bke"):
             raise ValueError(f"Unknown algorithm: {algorithm!r}. Valid options: 'bke_ic', 'bke'")
-        self.image_size = image_size
-        self.device = torch.device(device)
         self.algorithm = algorithm
-        self.labels_buffer = create_labels_buffer(image_size, self.device)
+        self.labels_buffer = create_labels_buffer(image_size, torch.device(device))
+        self.image_size = tuple(self.labels_buffer.shape)
+        self.device = self.labels_buffer.device
 
     def __call__(self, input: torch.Tensor) -> torch.Tensor:
         """
