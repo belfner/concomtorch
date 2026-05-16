@@ -152,10 +152,28 @@ def make_cuda_extension():
     Build the CUDAExtension descriptor.
 
     Imports torch.utils.cpp_extension lazily so the host environment can install or sync
-    package metadata without CUDA_HOME present. When CUDA_HOME is unset, return an empty
-    extension list so editable installs succeed for Python tooling.
+    package metadata without CUDA_HOME present. When CUDA is absent and this is a local
+    source build, return an empty extension list so editable installs succeed for Python
+    tooling. When CUDA is absent on the CI wheel-build path (signaled by CONCOMTORCH_CUDA /
+    CONCOMTORCH_TORCH being set), raise so a distributable wheel without the compiled op is
+    never published.
+
+    Raises
+    ------
+    SystemExit
+        When CUDA is unavailable during a CI wheel build.
     """
-    if os.environ.get('CUDA_HOME') is None and not os.path.exists('/usr/local/cuda'):
+    cuda_present = os.environ.get('CUDA_HOME') is not None or os.path.exists('/usr/local/cuda')
+    if not cuda_present:
+        is_ci_wheel_build = (
+            os.environ.get('CONCOMTORCH_CUDA', '').strip() != ''
+            or os.environ.get('CONCOMTORCH_TORCH', '').strip() != ''
+        )
+        if is_ci_wheel_build:
+            raise SystemExit(
+                'setup.py: CONCOMTORCH_CUDA/CONCOMTORCH_TORCH are set (CI wheel build) but no '
+                'CUDA toolkit was found. Refusing to build a wheel without the compiled op.'
+            )
         print('setup.py: CUDA_HOME not set; skipping CUDAExtension. Wheel will not contain the compiled op.')
         return []
 
