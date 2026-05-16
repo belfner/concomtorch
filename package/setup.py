@@ -76,6 +76,10 @@ def resolve_cuda_arch_list() -> str:
     parts = floor_str.split('.')
     # A bare major (e.g. "8") denotes the .0 capability (sm_80); a dotted
     # value (e.g. "7.5") carries its own minor.
+    if len(parts) > 2:
+        raise RuntimeError(
+            f"CONCOMTORCH_COMPUTE_MIN must look like 'X' or 'X.Y', got {floor_str!r}"
+        )
     try:
         floor = (int(parts[0]), int(parts[1]) if len(parts) > 1 else 0)
     except ValueError as exc:

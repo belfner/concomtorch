@@ -65,11 +65,10 @@ cd concomtorch
 pip install -e ./package
 ```
 
-A CUDA toolkit must be discoverable at build time through the `CUDA_HOME`
-environment variable or a `/usr/local/cuda` install; the build then compiles
-the CUDA extension. When the toolkit is absent the build produces a
-Python-only package: `import concomtorch` still succeeds, and the
-missing-extension error surfaces on the first operator call.
+The build locates `nvcc` at `$CUDA_HOME/bin/nvcc` when `CUDA_HOME` is set,
+otherwise on `PATH`; finding it compiles the CUDA extension. When the toolkit
+is absent the build produces a Python-only package: `import concomtorch` still
+succeeds, and the missing-extension error surfaces on the first operator call.
 
 ### Build with specific CUDA architectures
 
@@ -183,7 +182,7 @@ reuse).
 ### Algorithm variants
 
 ```python
-labels = connected_components(img, algorithm='bke_ic')  # default, fastest for 2D
+labels = connected_components(img, algorithm='bke_ic')  # default (inline compression)
 labels = connected_components(img, algorithm='bke')      # standard BKE
 ```
 
@@ -307,10 +306,11 @@ the output tensor to avoid extra allocations. The 2x2 block structure makes
 - **Stream/device.** Launches use the current CUDA stream and a `CUDAGuard`
   bound to the tensor's device; correctness under CUDA graph capture or
   multi-stream pipelines requires the caller to manage stream/event ordering.
-- **Determinism.** Final positive label *values* are derived from union-find
-  roots and may differ run-to-run, across devices, and between `bke`/`bke_ic`;
-  the *partition* into components is stable. Densify with `relabel_components`
-  if you need stable IDs.
+- **Determinism.** For a given input and algorithm the output is reproducible
+  run-to-run. Label *values* are union-find-root-derived: sparse, and specific
+  to the device and algorithm, so they can differ across devices and between
+  `bke`/`bke_ic`. The *partition* into components is stable. Densify with
+  `relabel_components` if you need contiguous IDs.
 
 ## Efficiency Tips
 
@@ -324,7 +324,8 @@ the output tensor to avoid extra allocations. The 2x2 block structure makes
 - **`collapse_consecutive=True`** (default) is fastest for typical CCL output
   with long equal-label runs; benchmark against `False` if your label field is
   scattered or noisy.
-- **`bke_ic`** (default) is generally the better 2D variant.
+- **`bke_ic`** is the default (inline-compression) variant; benchmark it
+  against `bke` on your workload if variant choice matters.
 - **`component_stats`** runs a GPU densification step then one fused
   accumulation kernel; **`get_component_masks`** materializes the mask stack
   with one fused kernel (preceded by a unique-label reduction when

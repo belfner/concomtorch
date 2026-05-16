@@ -1,8 +1,8 @@
 # concomtorch CI
 
-Self-hosted wheel build automation. Lives on one server, runs once a day, builds any
-(torch, cuda, py) combination that PyTorch publishes which is in `matrix.yaml` and not yet in the
-wheelhouse. Wheels carry PEP 440 local versions (`+cu126torch2.6.1`) and are published behind
+Self-hosted wheel build automation. Lives on one server, runs once a day, builds every
+(torch, cuda, py) combination PyTorch publishes at or above the floors in `matrix.yaml`
+that is not yet in the wheelhouse. Wheels carry PEP 440 local versions (`+cu126torch2.6.1`) and are published behind
 a two-layer PEP 503 simple index keyed by cuda variant then torch minor
 (`<cuda>/<torch_tag>/`, e.g. `cu126/torch2_6/`) that pip consumes via `--extra-index-url`.
 The user selects the cuda variant and torch minor matching their installed PyTorch and passes
@@ -13,7 +13,7 @@ that two-layer URL; the wheel for that bucket is the only `concomtorch` candidat
 
 | File | Role |
 |---|---|
-| `matrix.yaml` | Source of truth: cuda variants, py ABIs, torch_min, exclusions, docker pool sizing |
+| `matrix.yaml` | Build floors (`torch_min`, `python_min`, `compute_min`) and docker pool sizing |
 | `detect.py` | Query `torch-wheel-index`, intersect with matrix.yaml, emit WANTED set |
 | `plan.py` | Diff WANTED against wheelhouse contents, emit build plan grouped by (torch, cuda) |
 | `docker_pool.py` | List, build (parallel), and LRU-evict the manylinux+CUDA image cache |
