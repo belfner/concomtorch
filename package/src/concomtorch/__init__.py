@@ -86,6 +86,34 @@ def _validate_image(input: torch.Tensor) -> None:
         raise ValueError(f"Input tensor must be uint8 or bool, got {input.dtype}")
 
 
+def _same_cuda_device(a: torch.device, b: torch.device) -> bool:
+    """
+    Test whether two CUDA devices refer to the same physical device.
+
+    An index-less ``cuda`` device resolves to the current CUDA device, so
+    ``torch.device("cuda")`` and the concrete ``cuda:0`` of a ``.cuda()``
+    tensor compare equal.
+
+    Parameters
+    ----------
+    a : torch.device
+        First device.
+    b : torch.device
+        Second device.
+
+    Returns
+    -------
+    bool
+        True when both are CUDA devices resolving to the same index.
+    """
+    if a.type != "cuda" or b.type != "cuda":
+        return a == b
+    current = torch.cuda.current_device()
+    a_index = a.index if a.index is not None else current
+    b_index = b.index if b.index is not None else current
+    return a_index == b_index
+
+
 def _validate_labels_buffer(labels: torch.Tensor, input: torch.Tensor) -> None:
     """
     Validate a preallocated labels buffer against its input image.
@@ -107,7 +135,7 @@ def _validate_labels_buffer(labels: torch.Tensor, input: torch.Tensor) -> None:
         raise ValueError(f"Labels buffer must be on a CUDA device, got {labels.device}")
     if labels.dtype != torch.int32:
         raise ValueError(f"Labels buffer must be int32, got {labels.dtype}")
-    if labels.device != input.device:
+    if not _same_cuda_device(labels.device, input.device):
         raise ValueError(
             f"Labels buffer device {labels.device} does not match input "
             f"device {input.device}; they must be on the same CUDA device."
@@ -633,7 +661,7 @@ class ConnectedComponentsLabeler:
             raise ValueError(
                 f"Input shape {tuple(input.shape)} does not match configured image_size {tuple(self.image_size)}"
             )
-        if input.device != self.device:
+        if not _same_cuda_device(input.device, self.device):
             raise ValueError(f"Input device {input.device} does not match the labeler device {self.device}")
         return connected_components(input, labels=self.labels_buffer, algorithm=self.algorithm)
 

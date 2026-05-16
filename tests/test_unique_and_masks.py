@@ -151,7 +151,7 @@ def test_unique_labels_validation(cuda_device) -> None:
     cuda_device : torch.device
         CUDA device fixture.
     """
-    with pytest.raises(RuntimeError, match="CUDA"):
+    with pytest.raises(ValueError, match="CUDA"):
         concomtorch.get_unique_labels(torch.zeros((4, 4), dtype=torch.int32))
     with pytest.raises(ValueError, match="int32"):
         concomtorch.get_unique_labels(torch.zeros((4, 4), dtype=torch.int64, device="cuda"))
@@ -280,7 +280,7 @@ def test_component_masks_validation(cuda_device) -> None:
     """
     good = _label_on_gpu(_ccl_lib.random_image((16, 16), 0.3, "bernoulli", seed=19))
 
-    with pytest.raises(RuntimeError, match="CUDA"):
+    with pytest.raises(ValueError, match="CUDA"):
         concomtorch.get_component_masks(torch.zeros((4, 4), dtype=torch.int32))
     with pytest.raises(ValueError, match="int32"):
         concomtorch.get_component_masks(torch.zeros((4, 4), dtype=torch.int64, device="cuda"))

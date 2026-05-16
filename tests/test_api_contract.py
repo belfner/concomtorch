@@ -100,7 +100,7 @@ def test_non_contiguous_input_matches_logical_image(cuda_device, algorithm) -> N
 
 def test_cpu_input_rejected(cuda_device) -> None:
     """
-    A CPU input tensor raises ``RuntimeError`` mentioning the CUDA device.
+    A CPU input tensor raises ``ValueError`` mentioning the CUDA device.
 
     Parameters
     ----------
@@ -108,14 +108,14 @@ def test_cpu_input_rejected(cuda_device) -> None:
         CUDA device fixture.
     """
     cpu_tensor = torch.zeros((8, 8), dtype=torch.uint8)
-    with pytest.raises(RuntimeError, match="CUDA"):
+    with pytest.raises(ValueError, match="CUDA"):
         concomtorch.connected_components(cpu_tensor)
 
 
 @pytest.mark.parametrize("bad_shape", [(8,), (2, 3, 4)])
 def test_non_2d_input_rejected(cuda_device, bad_shape) -> None:
     """
-    1D and 3D inputs raise ``RuntimeError`` from the C++ ``TORCH_CHECK``.
+    1D and 3D inputs raise ``ValueError`` from Python-side validation.
 
     Parameters
     ----------
@@ -125,15 +125,15 @@ def test_non_2d_input_rejected(cuda_device, bad_shape) -> None:
         A non-2D shape.
     """
     tensor = torch.zeros(bad_shape, dtype=torch.uint8, device="cuda")
-    with pytest.raises(RuntimeError):
+    with pytest.raises(ValueError):
         concomtorch.connected_components(tensor)
 
 
 @pytest.mark.parametrize("bad_dtype", [torch.int32, torch.float32])
 def test_wrong_input_dtype_rejected(cuda_device, bad_dtype) -> None:
     """
-    ``int32`` / ``float32`` inputs raise ``RuntimeError`` from the C++
-    ``TORCH_CHECK``.
+    ``int32`` / ``float32`` inputs raise ``ValueError`` from Python-side
+    validation.
 
     Parameters
     ----------
@@ -143,7 +143,7 @@ def test_wrong_input_dtype_rejected(cuda_device, bad_dtype) -> None:
         An unsupported input dtype.
     """
     tensor = torch.zeros((8, 8), dtype=bad_dtype, device="cuda")
-    with pytest.raises(RuntimeError):
+    with pytest.raises(ValueError):
         concomtorch.connected_components(tensor)
 
 

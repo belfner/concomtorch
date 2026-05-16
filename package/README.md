@@ -65,10 +65,11 @@ cd concomtorch
 pip install -e ./package
 ```
 
-A working CUDA toolkit (`nvcc`) must be on `PATH` (or discoverable via
-`CUDA_HOME`). Without it the build installs a Python-only package and
-`import concomtorch` raises a `RuntimeError` explaining the extension is
-missing.
+A CUDA toolkit must be discoverable at build time through the `CUDA_HOME`
+environment variable or a `/usr/local/cuda` install; the build then compiles
+the CUDA extension. When the toolkit is absent the build produces a
+Python-only package: `import concomtorch` still succeeds, and the
+missing-extension error surfaces on the first operator call.
 
 ### Build with specific CUDA architectures
 
@@ -233,8 +234,10 @@ for scattered/noisy label fields.
 
 ### `get_component_masks(labels, unique_labels=None, exclude_background=True, collapse_consecutive=True)`
 
-`uint8` masks (values `0`/`1`), shape `(N, H, W)`, one plane per component, produced by a single
-fused grid-stride kernel. Memory is dense: `N * H * W` bytes regardless of
+`uint8` masks (values `0`/`1`), shape `(N, H, W)`, one plane per component. The
+mask stack is filled by a single fused grid-stride kernel; when `unique_labels`
+is not supplied a unique-label reduction runs first to determine `N` and the
+label set. Memory is dense: `N * H * W` bytes regardless of
 component size. This beats a `(max_label + 1, H, W)` one-hot only when labels
 are sparse; for many components it can be large. Passing `unique_labels`
 explicitly makes it the sole source of truth; combining it with non-default
@@ -261,7 +264,7 @@ Returns a `ComponentStats` dataclass:
 
 Empty input yields zero-length tensors with these dtypes.
 
-### `class ConnectedComponentsLabeler(shape, device='cuda', algorithm='bke_ic')`
+### `class ConnectedComponentsLabeler(image_size, device='cuda', algorithm='bke_ic')`
 
 Stateful helper holding one fixed-size internal buffer. `__call__(input)`
 validates that `input.shape` and `input.device` match the configured values.
@@ -323,9 +326,11 @@ the output tensor to avoid extra allocations. The 2x2 block structure makes
   scattered or noisy.
 - **`bke_ic`** (default) is generally the better 2D variant.
 - **`component_stats`** runs a GPU densification step then one fused
-  accumulation kernel; **`get_component_masks`** is a single fused kernel but
-  for thousands of components the dense `(N, H, W)` mask memory dominates, so
-  prefer `component_stats` when you only need area/bbox/centroid.
+  accumulation kernel; **`get_component_masks`** materializes the mask stack
+  with one fused kernel (preceded by a unique-label reduction when
+  `unique_labels` is not supplied), but for thousands of components the dense
+  `(N, H, W)` mask memory dominates, so prefer `component_stats` when you only
+  need area/bbox/centroid.
 
 ### Measuring on your workload
 

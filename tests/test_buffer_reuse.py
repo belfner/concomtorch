@@ -83,8 +83,8 @@ def test_garbage_prefilled_buffer_fully_overwritten(cuda_device, algorithm) -> N
 @pytest.mark.parametrize("bad_shape", [(33, 32), (32, 33), (32,)])
 def test_wrong_shape_buffer_rejected(cuda_device, bad_shape) -> None:
     """
-    A buffer whose shape differs from the input is rejected by the
-    C++ ``TORCH_CHECK`` as a ``RuntimeError``.
+    A buffer whose shape differs from the input is rejected by
+    Python-side validation as a ``ValueError``.
 
     Parameters
     ----------
@@ -95,7 +95,7 @@ def test_wrong_shape_buffer_rejected(cuda_device, bad_shape) -> None:
     """
     tensor = torch.zeros((32, 32), dtype=torch.uint8, device="cuda")
     buffer = torch.empty(bad_shape, dtype=torch.int32, device="cuda")
-    with pytest.raises(RuntimeError):
+    with pytest.raises(ValueError):
         concomtorch.connected_components(tensor, labels=buffer)
 
 
@@ -111,7 +111,7 @@ def test_non_contiguous_buffer_rejected(cuda_device) -> None:
     tensor = torch.zeros((16, 16), dtype=torch.uint8, device="cuda")
     buffer = torch.empty((16, 32), dtype=torch.int32, device="cuda")[:, ::2]
     assert not buffer.is_contiguous()
-    with pytest.raises(RuntimeError):
+    with pytest.raises(ValueError):
         concomtorch.connected_components(tensor, labels=buffer)
 
 
