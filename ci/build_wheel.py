@@ -10,6 +10,7 @@ CONCOMTORCH_CUDA / CONCOMTORCH_TORCH from CIBW_ENVIRONMENT.
 from __future__ import annotations
 
 import argparse
+import importlib.metadata
 import os
 import shlex
 import subprocess
@@ -50,6 +51,50 @@ def compute_cibw_build_pattern(py_abis: list[str]) -> str:
 def run(cmd: list[str], *, env: dict | None = None) -> None:
     print('>>', ' '.join(shlex.quote(c) for c in cmd), flush=True)
     subprocess.check_call(cmd, env=env)
+
+
+def preflight_buildable(
+    project_dir: Path,
+    py_abis: list[str],
+    env: dict,
+) -> list[str]:
+    """
+    Ask cibuildwheel which build identifiers it would emit and report missing ABIs.
+
+    The running cibuildwheel decides the set of Python ABIs it can target. When the
+    pinned cibuildwheel is too old (or too new) for a requested ABI it silently
+    produces no wheel for it. This queries `--print-build-identifiers` against the
+    fully composed CIBW environment and returns the requested ABIs that cibuildwheel
+    would not build.
+
+    Parameters
+    ----------
+    project_dir : Path
+        Path to the project directory passed to cibuildwheel.
+    py_abis : list[str]
+        Requested CPython ABI tags (any accepted form, e.g. 'cp310', '310').
+    env : dict
+        The fully composed CIBW environment used for the real build.
+
+    Returns
+    -------
+    list[str]
+        Normalized ABI tags (e.g. 'cp314') that cibuildwheel would not build.
+    """
+    result = subprocess.run(
+        [sys.executable, '-m', 'cibuildwheel', '--platform', 'linux',
+         '--print-build-identifiers', str(project_dir)],
+        env=env,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    identifiers = result.stdout.split()
+    missing = [
+        abi for abi in normalize_abis(py_abis)
+        if not any(ident.startswith(f'{abi}-') for ident in identifiers)
+    ]
+    return missing
 
 
 def parse_args() -> argparse.Namespace:
@@ -131,6 +176,18 @@ def main() -> int:
         'CIBW_BUILD_VERBOSITY': '2',
         'CIBW_CONTAINER_ENGINE': 'docker; create_args: -v concomtorch-pip-cache:/root/.cache/pip',
     })
+
+    missing = preflight_buildable(project_dir, args.py_abis, cibw_env)
+    if len(missing) > 0:
+        cibw_version = importlib.metadata.version('cibuildwheel')
+        print(
+            f'cibuildwheel {cibw_version} will not build these requested ABIs: '
+            f'{" ".join(missing)}. The pinned cibuildwheel cannot target them; '
+            f'adjust the cibuildwheel pin in the repo-root pyproject.toml or the '
+            f'--py request.',
+            file=sys.stderr,
+        )
+        return 3
 
     run(
         [sys.executable, '-m', 'cibuildwheel', '--platform', 'linux',

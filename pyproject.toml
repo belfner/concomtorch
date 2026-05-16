@@ -2,11 +2,11 @@
 name = "concomtorch-ops"
 version = "0.0.0"
 description = "Build, publish, and orchestration tooling for the concomtorch wheel matrix. The wheel itself lives under ./package."
-requires-python = ">=3.10"
+requires-python = ">=3.13"
 dependencies = [
     "pyyaml>=6.0",
     "torch-wheel-index>=0.2.0",
-    "cibuildwheel>=2.21.0",
+    "cibuildwheel>=3.1,<4",
 ]
 
 [tool.uv]
@@ -14,8 +14,8 @@ package = false
 
 [tool.black]
 line-length = 120
-target-version = ["py310", "py311", "py312"]
+target-version = ["py313"]
 
 [tool.ruff]
 line-length = 120
-target-version = "py310"
+target-version = "py313"
