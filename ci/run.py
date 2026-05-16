@@ -7,7 +7,12 @@ Steps:
   2. Diff against the on-disk wheelhouse to produce a plan grouped by (torch, cuda).
   3. Warm up docker images for the cuda variants the plan needs, in parallel.
   4. For each (torch, cuda) group, invoke ci/build_wheel.py serially (GPU box).
-  5. Move resulting wheels into the public serve root and regenerate HTML indexes.
+  5. Publish. In local mode wheels move into the serve root after each build. In
+     github-pages mode the release/index-sync runs whenever the wheelhouse holds
+     wheels, even on a tick that built nothing, so a release or gh-pages push that
+     failed on a prior tick is retried and a drifted index re-synced rather than
+     wedged forever behind an empty plan. ci/release.py is idempotent, so the
+     unconditional retry is a no-op when the index is already in sync.
   6. Evict least-recently-used images down to max_resident_images.
   7. Notify on failure.
 
@@ -173,53 +178,73 @@ def main() -> int:
     if args.limit is not None:
         groups = groups[:args.limit]
 
-    if len(groups) == 0:
-        print('Nothing to build. Exiting.')
-        return 0
+    have_builds = len(groups) > 0
+    publishes_independently = args.publish_mode == 'github-pages'
 
-    print(render_plan_table(groups))
+    if have_builds:
+        print(render_plan_table(groups))
+    else:
+        print('Nothing to build.')
+        if not publishes_independently:
+            # local mode republishes inside the build loop, so there is nothing to
+            # retry across ticks when the plan is empty.
+            return 0
 
     if args.dry_run:
         return 0
 
-    active_cuda = sorted({cuda for _, cuda, _ in groups})
-    print(f'\nActive cuda variants this tick: {active_cuda}', flush=True)
-
-    image_failures: list[str] = []
-    if not args.skip_image_warmup:
-        _success, image_failures = ensure_images_parallel(active_cuda, max_parallel=max_parallel)
-        if len(image_failures) > 0:
-            print(f'Image warmup failed for: {image_failures}. Groups using those variants will be skipped.',
-                  flush=True)
-
-    skip_cuda = set(image_failures)
     failures: list[tuple[str, str]] = []
-    for torch, cuda, pys in groups:
-        if cuda in skip_cuda:
-            failures.append((torch, cuda))
-            print(f'  - skipping {torch} / {cuda}: image unavailable', flush=True)
-            continue
-        ok = build_one(torch, cuda, pys, args.wheelhouse, compute_min)
-        if not ok:
-            failures.append((torch, cuda))
-            print(f'  ! build failed for {torch} / {cuda}', flush=True)
-            continue
-        if args.publish_mode == 'local':
-            publish(args.wheelhouse, args.serve_root)
+    active_cuda: list[str] = []
 
-    if args.publish_mode == 'github-pages' and len(groups) != len(failures):
-        release_cmd = [
-            sys.executable, str(CI_DIR / 'release.py'),
-            '--wheelhouse', str(args.wheelhouse),
-            '--tag-prefix', args.release_tag_prefix,
-        ]
-        print('>>', ' '.join(release_cmd), flush=True)
-        release_result = subprocess.run(release_cmd)
-        if release_result.returncode != 0:
-            failures.append(('release', 'gh-pages'))
-            print('  ! release step failed', flush=True)
+    if have_builds:
+        active_cuda = sorted({cuda for _, cuda, _ in groups})
+        print(f'\nActive cuda variants this tick: {active_cuda}', flush=True)
 
-    if not args.skip_eviction:
+        image_failures: list[str] = []
+        if not args.skip_image_warmup:
+            _success, image_failures = ensure_images_parallel(active_cuda, max_parallel=max_parallel)
+            if len(image_failures) > 0:
+                print(f'Image warmup failed for: {image_failures}. Groups using those variants will be skipped.',
+                      flush=True)
+
+        skip_cuda = set(image_failures)
+        for torch, cuda, pys in groups:
+            if cuda in skip_cuda:
+                failures.append((torch, cuda))
+                print(f'  - skipping {torch} / {cuda}: image unavailable', flush=True)
+                continue
+            ok = build_one(torch, cuda, pys, args.wheelhouse, compute_min)
+            if not ok:
+                failures.append((torch, cuda))
+                print(f'  ! build failed for {torch} / {cuda}', flush=True)
+                continue
+            if args.publish_mode == 'local':
+                publish(args.wheelhouse, args.serve_root)
+
+    publish_failed = False
+    if publishes_independently:
+        # Run release/index-sync whenever the wheelhouse holds any wheel file,
+        # independent of whether this tick built anything. This retries a prior failed
+        # release or gh-pages push and re-syncs a drifted index; ci/release.py is
+        # idempotent so an already-in-sync index is a no-op. The gate matches raw
+        # '*.whl' rather than parseable signatures so a build that emitted only
+        # malformed wheel filenames still reaches ci/release.py, whose unparsable-
+        # filename validation fails the tick loudly instead of silently skipping.
+        if args.wheelhouse.is_dir() and any(args.wheelhouse.glob('*.whl')):
+            release_cmd = [
+                sys.executable, str(CI_DIR / 'release.py'),
+                '--wheelhouse', str(args.wheelhouse),
+                '--tag-prefix', args.release_tag_prefix,
+            ]
+            print('>>', ' '.join(release_cmd), flush=True)
+            release_result = subprocess.run(release_cmd)
+            if release_result.returncode != 0:
+                publish_failed = True
+                print('  ! release step failed', flush=True)
+        else:
+            print('github-pages mode: wheelhouse empty, nothing to publish.', flush=True)
+
+    if have_builds and not args.skip_eviction:
         evicted = evict_lru(max_resident, keep=set(active_cuda))
         if len(evicted) > 0:
             print(f'Evicted {len(evicted)} image(s): {evicted}', flush=True)
@@ -227,13 +252,17 @@ def main() -> int:
     elapsed = time.monotonic() - started
     summary = (
         f'concomtorch tick: {len(groups) - len(failures)} groups ok, '
-        f'{len(failures)} failed, {elapsed:.0f}s'
+        f'{len(failures)} build failed, '
+        f'publish {"failed" if publish_failed else "ok"}, {elapsed:.0f}s'
     )
     print(summary)
 
-    if len(failures) > 0:
+    if len(failures) > 0 or publish_failed:
+        lines = [f'  {t} / {c}' for t, c in failures]
+        if publish_failed:
+            lines.append('  release / gh-pages')
         notify(
-            f'{summary}\nFailures:\n' + '\n'.join(f'  {t} / {c}' for t, c in failures),
+            f'{summary}\nFailures:\n' + '\n'.join(lines),
             title='concomtorch wheel build failed',
             priority='high',
         )
