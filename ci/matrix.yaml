@@ -1,10 +1,11 @@
 # Build matrix for concomtorch wheels.
 #
-# torch_min selects which torch versions to target. For every selected torch
-# version, ci/detect.py builds every cuda variant and every python ABI that
-# PyTorch actually publishes on download.pytorch.org (via torch-wheel-index),
-# subject only to the python_min floor. ci/plan.py then diffs the result
-# against the on-disk wheelhouse to decide what to build.
+# torch_min is the lowest torch version to target. ci/detect.py enumerates
+# every cuda variant and every python ABI (subject to python_min) that PyTorch
+# publishes on download.pytorch.org (via torch-wheel-index) for torch versions
+# at or above it. ci/plan.py then narrows that set to the latest patch of each
+# torch minor and diffs it against the on-disk wheelhouse, so the wheels
+# actually built are one per (torch_minor, cuda, python) at the newest patch.
 
 torch_min: '2.6.0'
 

@@ -162,6 +162,10 @@ def main() -> int:
 
     catalog = fetch_catalog()
     wanted = enumerate_wanted(matrix, catalog)
+    # Scan both publish destinations: local mode moves wheels into serve-root/files while
+    # github-pages mode leaves them in the wheelhouse. Taking the union keeps a tick that
+    # follows a publish-mode switch from rescheduling wheels that already exist in the
+    # other location.
     present = scan_wheelhouse(args.serve_root / 'files') | scan_wheelhouse(args.wheelhouse)
     plan = compute_plan(wanted, present)
     groups = group_by_torch_cuda(plan)
