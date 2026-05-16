@@ -661,8 +661,10 @@ class ConnectedComponentsLabeler:
             raise ValueError(
                 f"Input shape {tuple(input.shape)} does not match configured image_size {tuple(self.image_size)}"
             )
-        if not _same_cuda_device(input.device, self.device):
-            raise ValueError(f"Input device {input.device} does not match the labeler device {self.device}")
+        if not _same_cuda_device(input.device, self.labels_buffer.device):
+            raise ValueError(
+                f"Input device {input.device} does not match the labeler buffer device {self.labels_buffer.device}"
+            )
         return connected_components(input, labels=self.labels_buffer, algorithm=self.algorithm)
 
     def __repr__(self) -> str:
