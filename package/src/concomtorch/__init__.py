@@ -36,14 +36,14 @@ def _ensure_extension() -> None:
     global _EXTENSION_LOADED
     if _EXTENSION_LOADED:
         return
-    spec = importlib.util.find_spec('concomtorch._C')
+    spec = importlib.util.find_spec("concomtorch._C")
     if spec is None or spec.origin is None:
         raise RuntimeError(
-            'The compiled concomtorch._C extension is not available. This '
-            'happens when the package was built on a host without a CUDA '
-            'toolkit (nvcc), which produces a Python-only install. Install a '
-            'published wheel matching your CUDA/torch build, or build from '
-            'source on a machine with a CUDA toolkit.'
+            "The compiled concomtorch._C extension is not available. This "
+            "happens when the package was built on a host without a CUDA "
+            "toolkit (nvcc), which produces a Python-only install. Install a "
+            "published wheel matching your CUDA/torch build, or build from "
+            "source on a machine with a CUDA toolkit."
         )
     torch.ops.load_library(spec.origin)
     _EXTENSION_LOADED = True
@@ -59,10 +59,7 @@ def _require_cuda_available() -> None:
         If CUDA is not available in this process.
     """
     if not torch.cuda.is_available():
-        raise RuntimeError(
-            'CUDA is not available. concomtorch requires CUDA for connected '
-            'component labeling.'
-        )
+        raise RuntimeError("CUDA is not available. concomtorch requires CUDA for connected component labeling.")
 
 
 def _validate_image(input: torch.Tensor) -> None:
@@ -81,17 +78,12 @@ def _validate_image(input: torch.Tensor) -> None:
     """
     if not input.is_cuda:
         raise ValueError(
-            f'Input tensor must be on a CUDA device, got {input.device}. '
-            'Use input.cuda() to move the tensor to GPU.'
+            f"Input tensor must be on a CUDA device, got {input.device}. Use input.cuda() to move the tensor to GPU."
         )
     if input.dim() != 2:
-        raise ValueError(
-            f'Input tensor must be 2D (H, W), got shape {tuple(input.shape)}'
-        )
+        raise ValueError(f"Input tensor must be 2D (H, W), got shape {tuple(input.shape)}")
     if input.dtype not in (torch.uint8, torch.bool):
-        raise ValueError(
-            f'Input tensor must be uint8 or bool, got {input.dtype}'
-        )
+        raise ValueError(f"Input tensor must be uint8 or bool, got {input.dtype}")
 
 
 def _validate_labels_buffer(labels: torch.Tensor, input: torch.Tensor) -> None:
@@ -112,29 +104,23 @@ def _validate_labels_buffer(labels: torch.Tensor, input: torch.Tensor) -> None:
         device and shape as ``input``.
     """
     if not labels.is_cuda:
-        raise ValueError(
-            f'Labels buffer must be on a CUDA device, got {labels.device}'
-        )
+        raise ValueError(f"Labels buffer must be on a CUDA device, got {labels.device}")
     if labels.dtype != torch.int32:
-        raise ValueError(f'Labels buffer must be int32, got {labels.dtype}')
+        raise ValueError(f"Labels buffer must be int32, got {labels.dtype}")
     if labels.device != input.device:
         raise ValueError(
-            f'Labels buffer device {labels.device} does not match input '
-            f'device {input.device}; they must be on the same CUDA device.'
+            f"Labels buffer device {labels.device} does not match input "
+            f"device {input.device}; they must be on the same CUDA device."
         )
     if tuple(labels.shape) != tuple(input.shape):
-        raise ValueError(
-            f'Labels buffer shape {tuple(labels.shape)} does not match input '
-            f'shape {tuple(input.shape)}'
-        )
+        raise ValueError(f"Labels buffer shape {tuple(labels.shape)} does not match input shape {tuple(input.shape)}")
     if not labels.is_contiguous():
         raise ValueError(
-            'Labels buffer must be contiguous (it is written in place). '
-            'Allocate it with create_labels_buffer().'
+            "Labels buffer must be contiguous (it is written in place). Allocate it with create_labels_buffer()."
         )
 
 
-def _validate_label_map(labels: torch.Tensor, name: str = 'labels') -> None:
+def _validate_label_map(labels: torch.Tensor, name: str = "labels") -> None:
     """
     Validate a labeled component map produced by :func:`connected_components`.
 
@@ -151,21 +137,15 @@ def _validate_label_map(labels: torch.Tensor, name: str = 'labels') -> None:
         If the tensor is not a 2D int32 CUDA tensor.
     """
     if not labels.is_cuda:
-        raise ValueError(
-            f'{name} tensor must be on a CUDA device, got {labels.device}'
-        )
+        raise ValueError(f"{name} tensor must be on a CUDA device, got {labels.device}")
     if labels.dtype != torch.int32:
-        raise ValueError(f'{name} tensor must be int32, got {labels.dtype}')
+        raise ValueError(f"{name} tensor must be int32, got {labels.dtype}")
     if labels.dim() != 2:
-        raise ValueError(
-            f'{name} tensor must be 2D (H, W), got shape {tuple(labels.shape)}'
-        )
+        raise ValueError(f"{name} tensor must be 2D (H, W), got shape {tuple(labels.shape)}")
 
 
 def connected_components(
-    input: torch.Tensor,
-    labels: torch.Tensor | None = None,
-    algorithm: str = 'bke_ic'
+    input: torch.Tensor, labels: torch.Tensor | None = None, algorithm: str = "bke_ic"
 ) -> torch.Tensor:
     """
     Label connected components in a 2D binary image (CUDA only).
@@ -218,10 +198,8 @@ def connected_components(
     all-background image returns an all-zero / correctly shaped int32 result.
     Labels are deterministic in value set for a given input and algorithm.
     """
-    if algorithm not in ('bke_ic', 'bke'):
-        raise ValueError(
-            f"Unknown algorithm: {algorithm!r}. Valid options: 'bke_ic', 'bke'"
-        )
+    if algorithm not in ("bke_ic", "bke"):
+        raise ValueError(f"Unknown algorithm: {algorithm!r}. Valid options: 'bke_ic', 'bke'")
 
     _ensure_extension()
     _require_cuda_available()
@@ -229,15 +207,13 @@ def connected_components(
     if labels is not None:
         _validate_labels_buffer(labels, input)
 
-    if algorithm == 'bke_ic':
+    if algorithm == "bke_ic":
         return torch.ops.concomtorch.connected_components_bke_ic(input, labels)
     return torch.ops.concomtorch.connected_components_bke(input, labels)
 
 
 def create_labels_buffer(
-    shape: tuple[int, int],
-    device: torch.device | str = 'cuda',
-    zero_fill: bool = False
+    shape: tuple[int, int], device: torch.device | str = "cuda", zero_fill: bool = False
 ) -> torch.Tensor:
     """
     Create a reusable output buffer for :func:`connected_components`.
@@ -271,22 +247,16 @@ def create_labels_buffer(
         not a CUDA device.
     """
     if len(shape) != 2 or not all(isinstance(s, int) and s >= 0 for s in shape):
-        raise ValueError(
-            f'shape must be a 2-tuple (H, W) of non-negative ints, got {shape!r}'
-        )
+        raise ValueError(f"shape must be a 2-tuple (H, W) of non-negative ints, got {shape!r}")
     dev = torch.device(device)
-    if dev.type != 'cuda':
-        raise ValueError(
-            f'create_labels_buffer requires a CUDA device, got {dev}'
-        )
+    if dev.type != "cuda":
+        raise ValueError(f"create_labels_buffer requires a CUDA device, got {dev}")
     factory = torch.zeros if zero_fill else torch.empty
     return factory(shape, dtype=torch.int32, device=dev)
 
 
 def get_unique_labels(
-    labels: torch.Tensor,
-    exclude_background: bool = True,
-    collapse_consecutive: bool = True
+    labels: torch.Tensor, exclude_background: bool = True, collapse_consecutive: bool = True
 ) -> torch.Tensor:
     """
     Get unique component labels efficiently (all work stays on GPU).
@@ -320,16 +290,14 @@ def get_unique_labels(
     """
     _ensure_extension()
     _validate_label_map(labels)
-    return torch.ops.concomtorch.get_unique_labels(
-        labels, exclude_background, collapse_consecutive
-    )
+    return torch.ops.concomtorch.get_unique_labels(labels, exclude_background, collapse_consecutive)
 
 
 def get_component_masks(
     labels: torch.Tensor,
     unique_labels: torch.Tensor | None = None,
     exclude_background: bool = True,
-    collapse_consecutive: bool = True
+    collapse_consecutive: bool = True,
 ) -> torch.Tensor:
     """
     Convert a labeled component map to per-component binary masks.
@@ -383,41 +351,27 @@ def get_component_masks(
     if unique_labels is not None:
         if exclude_background is not True or collapse_consecutive is not True:
             raise ValueError(
-                'unique_labels was provided together with a non-default '
-                'exclude_background/collapse_consecutive. Those flags only '
-                'apply in auto-compute mode and would be ignored here. Pass '
-                'unique_labels alone (it is the sole source of truth), or '
-                'omit it to use the flags.'
+                "unique_labels was provided together with a non-default "
+                "exclude_background/collapse_consecutive. Those flags only "
+                "apply in auto-compute mode and would be ignored here. Pass "
+                "unique_labels alone (it is the sole source of truth), or "
+                "omit it to use the flags."
             )
         if not unique_labels.is_cuda:
-            raise ValueError(
-                f'unique_labels must be on a CUDA device, got '
-                f'{unique_labels.device}'
-            )
+            raise ValueError(f"unique_labels must be on a CUDA device, got {unique_labels.device}")
         if unique_labels.dtype != torch.int32:
-            raise ValueError(
-                f'unique_labels must be int32, got {unique_labels.dtype}'
-            )
+            raise ValueError(f"unique_labels must be int32, got {unique_labels.dtype}")
         if unique_labels.dim() != 1:
-            raise ValueError(
-                f'unique_labels must be 1D, got shape '
-                f'{tuple(unique_labels.shape)}'
-            )
+            raise ValueError(f"unique_labels must be 1D, got shape {tuple(unique_labels.shape)}")
         if unique_labels.device != labels.device:
             raise ValueError(
-                f'unique_labels device {unique_labels.device} does not match '
-                f'labels device {labels.device}'
+                f"unique_labels device {unique_labels.device} does not match labels device {labels.device}"
             )
 
-    return torch.ops.concomtorch.get_component_masks(
-        labels, unique_labels, exclude_background, collapse_consecutive
-    )
+    return torch.ops.concomtorch.get_component_masks(labels, unique_labels, exclude_background, collapse_consecutive)
 
 
-def relabel_components(
-    labels: torch.Tensor,
-    dense: bool = True
-) -> torch.Tensor:
+def relabel_components(labels: torch.Tensor, dense: bool = True) -> torch.Tensor:
     """
     Relabel a component map so ids are dense and sequential.
 
@@ -526,9 +480,7 @@ def component_stats(labels: torch.Tensor) -> ComponentStats:
             labels=unique,
             area=torch.empty(0, dtype=torch.int64, device=labels.device),
             bbox=torch.empty((0, 4), dtype=torch.int32, device=labels.device),
-            centroid=torch.empty(
-                (0, 2), dtype=torch.float64, device=labels.device
-            ),
+            centroid=torch.empty((0, 2), dtype=torch.float64, device=labels.device),
         )
 
     # Dense ids in [0, N) for the foreground; background and any value not in
@@ -537,21 +489,15 @@ def component_stats(labels: torch.Tensor) -> ComponentStats:
     idx = torch.searchsorted(unique, labels)
     idx_clamped = idx.clamp(max=num_components - 1)
     is_component = idx < num_components
-    is_component = is_component & (
-        unique[idx_clamped] == labels
-    )
+    is_component = is_component & (unique[idx_clamped] == labels)
     dense = torch.where(
         is_component,
         idx.to(torch.int32),
         torch.full_like(labels, -1, dtype=torch.int32),
     ).contiguous()
 
-    area, bbox, centroid = torch.ops.concomtorch.component_stats(
-        dense, int(num_components)
-    )
-    return ComponentStats(
-        labels=unique, area=area, bbox=bbox, centroid=centroid
-    )
+    area, bbox, centroid = torch.ops.concomtorch.component_stats(dense, int(num_components))
+    return ComponentStats(labels=unique, area=area, bbox=bbox, centroid=centroid)
 
 
 def _register_fake_kernels() -> None:
@@ -575,12 +521,12 @@ def _register_fake_kernels() -> None:
         return input.new_empty(input.shape, dtype=torch.int32)
 
     for name in (
-        'connected_components',
-        'connected_components_bke',
-        'connected_components_bke_ic',
+        "connected_components",
+        "connected_components_bke",
+        "connected_components_bke_ic",
     ):
         try:
-            lib_register_fake(f'concomtorch::{name}', _cc_fake)
+            lib_register_fake(f"concomtorch::{name}", _cc_fake)
         except (RuntimeError, AttributeError):
             # Op not registered (extension missing) or already has a fake
             # impl; shape-prop simply graph-breaks in that case.
@@ -607,9 +553,9 @@ def _resolve_version() -> str:
         ``'0.0.0+unknown'`` when package metadata is unavailable.
     """
     try:
-        return importlib.metadata.version('concomtorch')
+        return importlib.metadata.version("concomtorch")
     except importlib.metadata.PackageNotFoundError:
-        return '0.0.0+unknown'
+        return "0.0.0+unknown"
 
 
 __version__ = _resolve_version()
@@ -645,17 +591,9 @@ class ConnectedComponentsLabeler:
         The shared preallocated int32 buffer.
     """
 
-    def __init__(
-        self,
-        image_size: tuple[int, int],
-        device: torch.device | str = 'cuda',
-        algorithm: str = 'bke_ic'
-    ):
-        if algorithm not in ('bke_ic', 'bke'):
-            raise ValueError(
-                f"Unknown algorithm: {algorithm!r}. Valid options: "
-                "'bke_ic', 'bke'"
-            )
+    def __init__(self, image_size: tuple[int, int], device: torch.device | str = "cuda", algorithm: str = "bke_ic"):
+        if algorithm not in ("bke_ic", "bke"):
+            raise ValueError(f"Unknown algorithm: {algorithm!r}. Valid options: 'bke_ic', 'bke'")
         self.image_size = image_size
         self.device = torch.device(device)
         self.algorithm = algorithm
@@ -683,32 +621,26 @@ class ConnectedComponentsLabeler:
         """
         if tuple(input.shape) != tuple(self.image_size):
             raise ValueError(
-                f'Input shape {tuple(input.shape)} does not match configured '
-                f'image_size {tuple(self.image_size)}'
+                f"Input shape {tuple(input.shape)} does not match configured image_size {tuple(self.image_size)}"
             )
         if input.device != self.device:
-            raise ValueError(
-                f'Input device {input.device} does not match the labeler '
-                f'device {self.device}'
-            )
-        return connected_components(
-            input, labels=self.labels_buffer, algorithm=self.algorithm
-        )
+            raise ValueError(f"Input device {input.device} does not match the labeler device {self.device}")
+        return connected_components(input, labels=self.labels_buffer, algorithm=self.algorithm)
 
     def __repr__(self) -> str:
         return (
-            f'ConnectedComponentsLabeler(image_size={self.image_size}, '
-            f'device={self.device}, algorithm={self.algorithm!r})'
+            f"ConnectedComponentsLabeler(image_size={self.image_size}, "
+            f"device={self.device}, algorithm={self.algorithm!r})"
         )
 
 
 __all__ = [
-    'connected_components',
-    'create_labels_buffer',
-    'get_unique_labels',
-    'get_component_masks',
-    'relabel_components',
-    'component_stats',
-    'ComponentStats',
-    'ConnectedComponentsLabeler',
+    "connected_components",
+    "create_labels_buffer",
+    "get_unique_labels",
+    "get_component_masks",
+    "relabel_components",
+    "component_stats",
+    "ComponentStats",
+    "ConnectedComponentsLabeler",
 ]

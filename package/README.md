@@ -1,16 +1,18 @@
 # ConComTorch
 
-GPU-accelerated connected component labeling for PyTorch tensors using the state-of-the-art **Block-based Komura Equivalence (BKE)** algorithm.
+GPU-accelerated connected component labeling for 2D PyTorch tensors using the
+**Block-based Komura Equivalence (BKE)** algorithm (IEEE TPDS 2019). The package
+is a thin Python wrapper over a compiled CUDA extension registered through
+PyTorch's operator dispatcher.
 
 ## Features
 
-- **State-of-the-art BKE algorithm** - Implements the optimized block-based approach from IEEE TPDS 2019
-- **Fast CUDA implementation** - 4-9% faster than batched version by eliminating batch overhead
-- **8-connectivity support** - Diagonal neighbors are connected
-- **Buffer reuse** - Pre-allocate tensors for additional speedup
-- **2D-only optimized** - Focused on single image performance
-- **Support for uint8 and bool tensors**
-- **CUDA required** - GPU-only implementation
+- **BKE algorithm** with two variants: `bke_ic` (InlineCompression, default) and `bke` (standard)
+- **8-connectivity** on 2x2 blocks (diagonal neighbors are connected)
+- **Buffer reuse** via a caller-supplied output tensor to skip the output allocation
+- **uint8 and bool** input tensors
+- **Stream- and device-correct** launches (`CUDAGuard` + current CUDA stream)
+- **Typed**: ships `py.typed`; meta/fake kernels registered for the shape-stable ops
 
 ## Installation
 
@@ -18,34 +20,55 @@ GPU-accelerated connected component labeling for PyTorch tensors using the state
 
 - Python >= 3.10
 - PyTorch >= 2.4.0
-- CUDA >= 11.8
+- CUDA >= 11.8 runtime, and a CUDA toolkit (`nvcc`) for source builds
 - C++ compiler with C++17 support
-- NVIDIA GPU with compute capability >= 7.0
+- NVIDIA GPU with compute capability >= 7.5 (Turing or newer)
+
+The published wheels are built for SASS on the architectures listed per channel
+plus a PTX fallback for the highest target, so newer GPUs run via JIT PTX
+compilation. Source builds default to compute capabilities `>= 7.5` available
+from the local toolkit (override with `TORCH_CUDA_ARCH_LIST` or
+`CONCOMTORCH_COMPUTE_MIN`).
 
 ### Install the published wheel
 
 Wheels are published behind a two-layer simple index keyed by CUDA variant and
-torch minor (`<cuda>/<torch_tag>/`). Pick the directory matching the CUDA build
-and torch minor of your installed PyTorch and pass it as the index URL. For
-example, CUDA 12.6 with torch 2.6:
+torch minor (`<cuda>/<torch_tag>/`). The wheel's compiled extension is built
+against a specific PyTorch CUDA build; **the channel you install from must match
+the CUDA build of the PyTorch already in your environment** (check
+`torch.version.cuda` and `torch.__version__`). A mismatch fails at
+`import concomtorch` with an opaque symbol/ABI error rather than at install
+time.
+
+Pick the directory matching your installed PyTorch. For CUDA 12.6 with torch 2.6:
 
 ```bash
-pip install concomtorch --extra-index-url https://belfner.github.io/concomtorch/cu126/torch2_6/
+pip install concomtorch --index-url https://belfner.github.io/concomtorch/cu126/torch2_6/
 ```
 
-Browse `https://belfner.github.io/concomtorch/` to see the available CUDA
-variants and, under each, the torch channels.
+`--index-url` restricts resolution to the project index. If you need PyPI for
+other dependencies in the same command, use `--extra-index-url` instead and be
+aware pip will also consider PyPI for a package named `concomtorch`; prefer a
+separate, isolated install step for the supply-chain-sensitive package.
+
+Browse `https://belfner.github.io/concomtorch/` for the available CUDA variants
+and, under each, the torch channels.
 
 ### Install from source
 
 The buildable package lives in `package/`. The repository root is the CI
-orchestration environment and is not the package, so install the subdirectory:
+orchestration environment, not the package, so install the subdirectory:
 
 ```bash
 git clone <repository-url>
 cd concomtorch
 pip install -e ./package
 ```
+
+A working CUDA toolkit (`nvcc`) must be on `PATH` (or discoverable via
+`CUDA_HOME`). Without it the build installs a Python-only package and
+`import concomtorch` raises a `RuntimeError` explaining the extension is
+missing.
 
 ### Build with specific CUDA architectures
 
@@ -64,56 +87,103 @@ TORCH_CUDA_ARCH_LIST='8.0;8.6;9.0' pip install -e ./package
 import torch
 from concomtorch import connected_components
 
-# Create a binary image on CUDA (required)
+# Binary image on CUDA (required). Any non-zero value is foreground; 0 is background.
 img = torch.tensor(
     [[1, 1, 0, 0],
      [0, 0, 0, 1],
      [0, 1, 1, 1]],
     dtype=torch.uint8,
-    device='cuda'  # Must be on CUDA
+    device='cuda',
 )
 
-# Label connected components
 labels = connected_components(img)
-print(labels)
-# Output: Background pixels are 0, components labeled 1, 2, 3, ...
+# int32 (H, W). Background pixels are 0. Component IDs are positive but
+# sparse (root-derived), not a dense 1..N range. See relabel_components.
 ```
 
-### Buffer reuse for maximum performance
+### Buffer reuse
 
-Pre-allocate tensors to eliminate allocation overhead (~30-40% speedup):
+Supply a pre-allocated output tensor to skip the per-call output allocation:
 
 ```python
 import torch
 from concomtorch import connected_components, create_labels_buffer
 
-# Create buffer once
 labels_buffer = create_labels_buffer((512, 512))
 
-# Reuse in loop
+results = []
 for img in image_batch:
     labels = connected_components(img, labels=labels_buffer)
-    # Process labels...
+    # `labels` IS `labels_buffer` (aliased). Retaining it across iterations
+    # requires a copy, or every stored result points at the last image.
+    results.append(labels.clone())
 ```
 
-### Get component count
+The return value aliases the supplied buffer. The buffer only removes the
+output allocation; a non-contiguous input is still copied to a contiguous
+temporary internally.
+
+### Counting and enumerating components
 
 ```python
 from concomtorch import connected_components, get_unique_labels
 
 labels = connected_components(img)
-num_components = len(get_unique_labels(labels))  # Fast, optimized for CCL
-print(f'Found {num_components} objects')
+ids = get_unique_labels(labels)          # sorted int32 IDs, background excluded
+num_components = ids.numel()
 ```
+
+### Densifying labels
+
+`connected_components` produces sparse positive IDs. `relabel_components`
+remaps them to a contiguous `0..N` range (0 stays background if present):
+
+```python
+from concomtorch import relabel_components
+
+dense = relabel_components(labels)       # pure-torch, stays on GPU
+```
+
+### Per-component statistics
+
+```python
+from concomtorch import component_stats
+
+stats = component_stats(labels)
+stats.labels    # int32 (N,)  original sparse IDs, ascending
+stats.area      # int64 (N,)  pixel count per component
+stats.bbox      # int32 (N,4) [min_row, min_col, max_row, max_col] inclusive
+stats.centroid  # float64 (N,2) [row, col]
+```
+
+### Component masks
+
+```python
+from concomtorch import get_component_masks
+
+masks = get_component_masks(labels)      # bool (N, H, W), one plane per component
+```
+
+### Reusable labeler helper
+
+```python
+from concomtorch import ConnectedComponentsLabeler
+
+labeler = ConnectedComponentsLabeler((512, 512), algorithm='bke_ic')
+labels = labeler(img)                    # input shape and device must match config
+```
+
+`ConnectedComponentsLabeler` owns one internal buffer and is **not**
+thread-safe or stream-safe. Use one instance per device, per CUDA stream, and
+per in-flight operation; serialize concurrent use or give each worker its own
+labeler. Output aliases the internal buffer (same `.clone()` rule as buffer
+reuse).
 
 ### Algorithm variants
 
 ```python
-# BKE with InlineCompression (default, fastest for 2D)
-labels = connected_components(img, algorithm='bke_ic')
-
-# Standard BKE
-labels = connected_components(img, algorithm='bke')
+labels = connected_components(img, algorithm='bke_ic')  # default, fastest for 2D
+labels = connected_components(img, algorithm='bke')      # standard BKE
 ```
 
 ## API Reference
@@ -122,128 +192,166 @@ labels = connected_components(img, algorithm='bke')
 
 Label connected components in a binary image using 8-connectivity (CUDA only).
 
-**Parameters:**
+- `input` (`torch.Tensor`): CUDA tensor, shape `(H, W)`, dtype `uint8` or
+  `bool`. Any non-zero value is foreground; `0` is background. Non-contiguous
+  input is copied to a contiguous temporary.
+- `labels` (`torch.Tensor`, optional): pre-allocated `int32` CUDA tensor of
+  shape `(H, W)` on the same device as `input`. Modified in-place and returned
+  (aliased). Size/dtype/device validated.
+- `algorithm` (`str`): `'bke_ic'` (default) or `'bke'`. Other values raise
+  `ValueError`.
 
-- `input` (torch.Tensor): Binary CUDA tensor of shape (H, W) with dtype uint8 or bool. Foreground pixels should have non-zero values. **Must be on CUDA device.**
+Returns an `int32` CUDA tensor `(H, W)`; background `0`, component IDs positive
+and **sparse** (not dense `1..N`). Runs under `no_grad` semantics (integer
+output, no autograd).
 
-- `labels` (torch.Tensor, optional): Pre-allocated int32 CUDA tensor of shape (H, W). If provided, avoids allocation overhead (4-9% faster for repeated calls with same image size). The tensor will be modified in-place.
+Raises `RuntimeError` if CUDA is unavailable or the compiled extension is
+missing; `ValueError` for an invalid algorithm or a mismatched `input`/`labels`
+tensor.
 
-- `algorithm` (str, default='bke_ic'): Which algorithm variant to use:
-  - `'bke_ic'`: BKE with InlineCompression (recommended)
-  - `'bke'`: Standard BKE
+### `create_labels_buffer(shape, device='cuda', zero_fill=False)`
 
-**Returns:**
+Allocate a reusable `int32` output buffer.
 
-- torch.Tensor: Integer CUDA tensor of shape (H, W) with dtype int32. Background pixels are labeled 0, components labeled 1, 2, 3, ...
+- `shape` (`tuple[int, int]`): `(H, W)`, non-negative ints, matching your
+  inputs.
+- `device`: CUDA device for the buffer.
+- `zero_fill` (`bool`): `False` (default) returns `torch.empty` (fast);
+  `True` returns `torch.zeros` for debugging buffer-overwrite assumptions.
 
-**Raises:**
-
-- RuntimeError: If CUDA is not available or input tensor is not on CUDA device.
-- ValueError: If algorithm name is invalid or labels tensor shape/dtype mismatches.
-
-### `create_labels_buffer(shape, device='cuda')`
-
-Create a reusable buffer for connected components labels.
-
-**Parameters:**
-
-- `shape` (tuple[int, int]): Shape of the labels tensor (H, W), matching your input images.
-
-- `device` (torch.device or str, default='cuda'): Device to allocate the buffer on.
-
-**Returns:**
-
-- torch.Tensor: Uninitialized int32 tensor that can be passed to `connected_components()` via the `labels` parameter.
+The fast path relies on every output cell being written each call; that
+contract is enforced by tests across odd / empty / all-background sizes. Use
+`zero_fill=True` if you suspect a leak from a prior image.
 
 ### `get_unique_labels(labels, exclude_background=True, collapse_consecutive=True)`
 
-Get unique component labels efficiently.
+Unique component IDs as a sorted `int32` CUDA tensor. Fully GPU-side (no host
+sync). `collapse_consecutive=True` first applies
+`torch.unique_consecutive(labels.flatten())`; this is much faster when equal
+labels form long contiguous runs (typical CCL output) and adds a redundant pass
+for scattered/noisy label fields.
 
-**Parameters:**
+### `get_component_masks(labels, exclude_background=True, collapse_consecutive=True, unique_labels=None)`
 
-- `labels` (torch.Tensor): Labeled image from `connected_components()`, shape (H, W), dtype int32.
+Boolean masks, shape `(N, H, W)`, one plane per component, produced by a single
+fused grid-stride kernel. Memory is dense: `N * H * W` bytes regardless of
+component size. This beats a `(max_label + 1, H, W)` one-hot only when labels
+are sparse; for many components it can be large. Passing `unique_labels`
+explicitly makes it the sole source of truth; combining it with non-default
+`exclude_background` / `collapse_consecutive` raises `ValueError`.
 
-- `exclude_background` (bool, default=True): If True, exclude background pixels (label 0) from result.
+### `relabel_components(labels, dense=True)`
 
-- `collapse_consecutive` (bool, default=True): If True, use `torch.unique(torch.unique_consecutive(labels.flatten()))` for faster computation. Recommended for connected component labels which have large contiguous regions of identical values.
+Pure-torch remap of sparse IDs to a contiguous range, fully on-device. With
+`dense=True`, background `0` (if present) stays `0` and components become
+`1..N`. Returns `int32`, same shape as `labels`.
 
-**Returns:**
+### `component_stats(labels) -> ComponentStats`
 
-- torch.Tensor: Unique label values as int32 tensor on CUDA, sorted in ascending order.
+Per-component area, bounding box, and centroid via a single fused CUDA kernel
+(one DRAM pass). Returns a `ComponentStats` dataclass:
 
-**Notes:**
+- `labels` `int32 (N,)` original IDs ascending
+- `area` `int64 (N,)` pixel counts
+- `bbox` `int32 (N, 4)` `[min_row, min_col, max_row, max_col]`, inclusive
+- `centroid` `float64 (N, 2)` `[row, col]`
 
-- `collapse_consecutive=True` is significantly faster for CCL outputs (e.g., 512x512 image: ~262K → ~100 elements to unique)
-- Use this to count components: `len(get_unique_labels(labels))`
+Empty input yields zero-length tensors with these dtypes.
+
+### `class ConnectedComponentsLabeler(shape, device='cuda', algorithm='bke_ic')`
+
+Stateful helper holding one fixed-size internal buffer. `__call__(input)`
+validates that `input.shape` and `input.device` match the configured values.
+Strictly fixed-size by design. Not thread-/stream-safe (see Usage).
 
 ## Algorithm
 
-ConComTorch implements the **Block-based Komura Equivalence (BKE)** algorithm from:
+ConComTorch implements the **Block-based Komura Equivalence (BKE)** algorithm:
 
-> Stefano Allegretti, Federico Bolelli, Michele Cancilla, and Costantino Grana.
+> Stefano Allegretti, Federico Bolelli, Michele Cancilla, Costantino Grana.
 > "Optimized Block-Based Algorithms to Label Connected Components on GPUs."
-> *IEEE Transactions on Parallel and Distributed Systems (TPDS)*, 2019.
+> *IEEE Transactions on Parallel and Distributed Systems*, 2019.
 
-### How BKE Works
+BKE operates on **2x2 blocks** rather than individual pixels, reducing memory
+accesses and atomic operations. The pipeline is five kernels: Init (block
+connectivity via a 16-bit BitSet) -> Compress (path compression) -> Reduction
+(union for remaining connections) -> Compress -> FinalLabel (block labels to
+pixels). The `bke_ic` variant updates the parent at each traversal step
+(InlineCompression) for faster convergence. Intermediate state is packed into
+the output tensor to avoid extra allocations. The 2x2 block structure makes
+8-connectivity the native, fixed connectivity.
 
-Unlike traditional pixel-based approaches, BKE operates on **2×2 blocks** rather than individual pixels, dramatically reducing memory accesses and atomic operations.
+## Limitations and Semantics
 
-**5-Kernel Pipeline:**
+- **CUDA-only.** CPU tensors are rejected; there is no CPU fallback.
+- **2D single-image only.** No batched `(N, H, W)` API and no 3D volumes;
+  iterate in Python for batches.
+- **Fixed 8-connectivity.** 4-connectivity is not provided (the 2x2 block
+  structure is intrinsically 8-connected).
+- **Sparse labels.** Component IDs are positive but root-derived, not dense.
+  Use `relabel_components` for a contiguous range.
+- **int32 label space.** Pixel-index arithmetic is `int32`; images with more
+  than ~2^31 pixels are unsupported.
+- **Non-contiguous input is copied.** A contiguous temporary is allocated
+  internally, so buffer reuse is allocation-free only for contiguous input.
+- **Contiguous, same-device buffers.** A supplied `labels` (or
+  `unique_labels`) tensor must be on the same CUDA device as the input.
+- **Concurrency.** `ConnectedComponentsLabeler` and any shared reuse buffer are
+  single-context: one per device, per stream, per in-flight op.
+- **Stream/device.** Launches use the current CUDA stream and a `CUDAGuard`
+  bound to the tensor's device; correctness under CUDA graph capture or
+  multi-stream pipelines requires the caller to manage stream/event ordering.
+- **Determinism.** Final positive label *values* are derived from union-find
+  roots and may differ run-to-run, across devices, and between `bke`/`bke_ic`;
+  the *partition* into components is stable. Densify with `relabel_components`
+  if you need stable IDs.
 
-1. **Init Kernel**: Detects block connectivity using 16-bit BitSet with 0x777 bitmask pattern, packs information byte
-2. **Compress Kernel**: First tree flattening (path compression)
-3. **Reduction Kernel**: Union operations for remaining connections
-4. **Compress Kernel**: Second tree flattening
-5. **FinalLabel Kernel**: Copies block labels to individual pixels
+## Efficiency Tips
 
-**Key Optimizations:**
+- **Reuse a buffer** with `create_labels_buffer` + the `labels=` parameter for
+  repeated same-size calls. Remember the return aliases the buffer; `.clone()`
+  any result you retain across iterations.
+- **Keep inputs contiguous** (`img.contiguous()` once, upstream) so buffer
+  reuse actually avoids all allocations.
+- **One labeler per stream/device.** For concurrent pipelines, give each
+  worker/stream its own `ConnectedComponentsLabeler` or reuse buffer.
+- **`collapse_consecutive=True`** (default) is fastest for typical CCL output
+  with long equal-label runs; benchmark against `False` if your label field is
+  scattered or noisy.
+- **`bke_ic`** (default) is generally the better 2D variant.
+- **`component_stats` / `get_component_masks`** are single fused kernels; for
+  thousands of components the dense `(N, H, W)` mask memory dominates, so
+  prefer `component_stats` when you only need area/bbox/centroid.
 
-- **Block-based approach**: Processes 2×2 blocks instead of pixels for fewer operations
-- **BitSet connectivity detection**: Efficient 16-bit pattern matching
-- **Information byte packing**: 8 bits encode internal pixels and neighbor unions
-- **InlineCompression**: Updates parent at each tree traversal step for faster convergence
-- **Memory reuse**: Stores temporary data in output image pixels to avoid extra allocations
+### Measuring on your workload
 
-**Connectivity:**
+Performance depends on image size, component count and size, label-field
+contiguity, allocation mode, and GPU architecture. Benchmark with your data and
+a warmed device:
 
-- **8-connectivity**: Diagonal neighbors are connected (BKE's 2×2 blocks guarantee correct labeling)
+```python
+import torch, time
+from concomtorch import connected_components, create_labels_buffer
 
-## Performance
+img = your_binary_image_cuda
+buf = create_labels_buffer(img.shape)
+for _ in range(10):                       # warm up
+    connected_components(img, labels=buf)
+torch.cuda.synchronize()
+t0 = time.perf_counter()
+for _ in range(100):
+    connected_components(img, labels=buf)
+torch.cuda.synchronize()
+print((time.perf_counter() - t0) / 100 * 1e3, 'ms/call')
+```
 
-### Expected Speedup
-
-- **4-9% speedup** over batched version by eliminating batch processing overhead
-- **Additional speedup** when using buffer reuse for repeated calls
-
-### Performance Tips
-
-- Use buffer reuse (`labels` parameter) for repeated calls with same image size
-- BKE_IC (default) is recommended for best performance
-- Process images in a loop rather than batching for optimal performance
-
-### Benchmarks
-
-Performance depends on:
-- Image size
-- Number and size of components
-- GPU architecture
-
-The BKE algorithm is particularly efficient for:
-- Large images (>512×512)
-- Many small components
-- Iterative processing with buffer reuse
+Compare against `scipy.ndimage.label`, `cc3d`, or `kornia` on your inputs for a
+meaningful baseline.
 
 ## Development
 
-### Install development dependencies
-
 ```bash
 pip install -e './package[dev]'
-```
-
-### Code formatting
-
-```bash
 ruff check package/src/
 ruff format package/src/
 ```
@@ -253,8 +361,6 @@ ruff format package/src/
 MIT License - see [LICENSE](LICENSE)
 
 ## Citation
-
-If you use ConComTorch in your research, please cite the original BKE paper:
 
 ```bibtex
 @article{allegretti2019optimized,
@@ -271,4 +377,4 @@ If you use ConComTorch in your research, please cite the original BKE paper:
 
 ## Contributing
 
-Contributions are welcome! Please feel free to submit a Pull Request.
+Contributions are welcome. Please open a Pull Request.
