@@ -35,3 +35,6 @@ Thumbs.db
 
 # Local secrets (e.g. GH_TOKEN consumed by ci/release.py)
 .env
+
+# CI orchestration logs (loguru rotating sinks from ci/logging_setup.py)
+/logs/

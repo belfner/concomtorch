@@ -24,6 +24,10 @@ from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 
+from loguru import logger
+
+from logging_setup import setup_logging
+
 CUDA_TAG_RE = re.compile(r'^cu(?P<major>\d+)(?P<minor>\d)$')
 
 IMAGE_NAMESPACE = 'concomtorch-manylinux'
@@ -84,7 +88,7 @@ def run(cmd: list[str], *, check: bool = True, capture: bool = False) -> subproc
     """
     Subprocess helper that logs the command, respects check, and optionally captures output.
     """
-    print('>>', ' '.join(shlex.quote(c) for c in cmd), flush=True)
+    logger.info('>> ' + ' '.join(shlex.quote(c) for c in cmd))
     return subprocess.run(cmd, check=check, capture_output=capture, text=True)
 
 
@@ -230,9 +234,9 @@ def delete_image(tag: str) -> bool:
     """
     result = subprocess.run(['docker', 'rmi', tag], capture_output=True, text=True)
     if result.returncode == 0:
-        print(f'Deleted image {tag}', flush=True)
+        logger.info(f'Deleted image {tag}')
         return True
-    print(f'Failed to delete {tag}: {result.stderr.strip()}', flush=True)
+    logger.warning(f'Failed to delete {tag}: {result.stderr.strip()}')
     return False
 
 
@@ -262,11 +266,10 @@ def ensure_images_parallel(
     missing = [cv for cv in cuda_variants if cv not in present]
 
     if len(missing) == 0:
-        print(f'All {len(cuda_variants)} images already resident.', flush=True)
+        logger.info(f'All {len(cuda_variants)} images already resident.')
         return list(cuda_variants), []
 
-    print(f'Building {len(missing)} image(s) with up to {max_parallel} in parallel: {missing}',
-          flush=True)
+    logger.info(f'Building {len(missing)} image(s) with up to {max_parallel} in parallel: {missing}')
 
     success: list[str] = list(present & set(cuda_variants))
     failed: list[str] = []
@@ -276,7 +279,7 @@ def ensure_images_parallel(
         try:
             build_image(cv, manylinux_image)
             with print_lock:
-                print(f'Built {image_tag(cv)}', flush=True)
+                logger.info(f'Built {image_tag(cv)}')
             return (cv, True, '')
         except subprocess.CalledProcessError as exc:
             return (cv, False, str(exc))
@@ -289,7 +292,7 @@ def ensure_images_parallel(
                 success.append(cv)
             else:
                 failed.append(cv)
-                print(f'Image build failed for {cv}: {err}', flush=True)
+                logger.error(f'Image build failed for {cv}: {err}')
 
     return success, failed
 
@@ -322,9 +325,8 @@ def evict_lru(max_resident: int, keep: set[str]) -> list[str]:
 
     to_delete = max(0, len(resident) - max_resident)
     if to_delete > len(evictable):
-        print(
-            f'Cannot evict to {max_resident}: only {len(evictable)} images outside the keep set.',
-            flush=True,
+        logger.warning(
+            f'Cannot evict to {max_resident}: only {len(evictable)} images outside the keep set.'
         )
         to_delete = len(evictable)
 
@@ -355,20 +357,27 @@ def main() -> int:
 
     args = parser.parse_args()
 
+    # The `list` subcommand writes a raw TSV contract to stdout. Configure
+    # logging only for the operational branches so the `CONCOMTORCH_LOG_LEVEL`
+    # override cannot place a log record on the machine-readable stream.
     if args.cmd == 'list':
         for info in list_resident():
             print(f'{info.tag}\t{info.image_id}\t{info.size_bytes // 1024 // 1024} MB\t{info.created.isoformat()}')
         return 0
 
+    setup_logging('docker_pool')
+
     if args.cmd == 'ensure':
         success, failed = ensure_images_parallel(args.cuda, max_parallel=args.max_parallel)
-        print(f'success: {success}')
-        print(f'failed: {failed}')
-        return 0 if len(failed) == 0 else 1
+        logger.info(f'success: {success}')
+        if len(failed) > 0:
+            logger.error(f'failed: {failed}')
+            return 1
+        return 0
 
     if args.cmd == 'evict':
         deleted = evict_lru(args.max_resident, keep=set(args.keep))
-        print(f'deleted: {deleted}')
+        logger.info(f'deleted: {deleted}')
         return 0
 
     return 2

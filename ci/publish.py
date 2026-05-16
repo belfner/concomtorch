@@ -37,6 +37,9 @@ from collections import defaultdict
 from collections.abc import Callable
 from pathlib import Path
 
+from loguru import logger
+
+from logging_setup import setup_logging
 from plan import parse_wheel
 from plan import torch_minor
 
@@ -366,7 +369,7 @@ def render_index_tree(
         _write_project_page(serve_root, cuda, minor, wheels, wheel_href)
         _write_torch_root(serve_root, cuda, minor)
         minors_by_cuda[cuda].append(minor)
-        print(f'Rendered {cuda}/{torch_dir_name(minor)} with {len(wheels)} wheel(s).', flush=True)
+        logger.info(f'Rendered {cuda}/{torch_dir_name(minor)} with {len(wheels)} wheel(s).')
 
     for cuda, minors in sorted(minors_by_cuda.items()):
         _write_cuda_index(serve_root, cuda, minors)
@@ -429,15 +432,17 @@ def main() -> int:
                              'index is written here.')
     args = parser.parse_args()
 
+    setup_logging('publish')
+
     if not args.skip_move:
         moved = move_new_wheels(args.source, args.serve_root / 'files')
-        print(f'Moved {len(moved)} wheels into {args.serve_root / "files"}')
+        logger.info(f'Moved {len(moved)} wheels into {args.serve_root / "files"}')
         groups = collect(args.serve_root)
     else:
         groups = collect_from(args.source)
 
     render_index_tree(args.serve_root, groups, args.files_base_url)
-    print(f'Wrote index tree under {args.serve_root}')
+    logger.success(f'Wrote index tree under {args.serve_root}')
 
     return 0
 

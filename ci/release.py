@@ -36,6 +36,9 @@ from collections import defaultdict
 from collections.abc import Iterator
 from pathlib import Path
 
+from loguru import logger
+
+from logging_setup import setup_logging
 from plan import (
     parse_wheel,
     torch_minor,
@@ -101,7 +104,7 @@ def run(cmd: list[str], *, cwd: Path | None = None, capture: bool = False) -> su
     """
     Subprocess wrapper that echoes the command before executing.
     """
-    print('>>', ' '.join(cmd), flush=True)
+    logger.info('>> ' + ' '.join(cmd))
     return subprocess.run(cmd, cwd=cwd, check=True, capture_output=capture, text=True)
 
 
@@ -178,7 +181,7 @@ def ensure_release(tag: str, owner: str, name: str) -> None:
         capture_output=True, text=True,
     )
     if check.returncode == 0:
-        print(f'Release {tag} already exists.', flush=True)
+        logger.info(f'Release {tag} already exists.')
         return
     run([
         'gh', 'release', 'create', tag,
@@ -288,22 +291,20 @@ def upload_wheels(wheelhouse: Path, tag_prefix: str, owner: str, name: str) -> l
         repair = [w for w in wheels if w.name in existing and w.name not in complete]
         skipped = [w for w in wheels if w.name in complete]
         if len(skipped) > 0:
-            print(
+            logger.info(
                 f'[{tag}] Skipping {len(skipped)} wheel(s) already on the release. '
                 'To replace a published wheel, bump the version (or delete the asset on '
-                'GitHub) and rerun.',
-                flush=True,
+                'GitHub) and rerun.'
             )
             for w in skipped:
-                print(f'  - already on release: {w.name}', flush=True)
+                logger.info(f'  - already on release: {w.name}')
         if len(fresh) == 0 and len(repair) == 0:
-            print(
-                f'[{tag}] No new wheels to upload (release already has {len(existing)} assets).',
-                flush=True,
+            logger.info(
+                f'[{tag}] No new wheels to upload (release already has {len(existing)} assets).'
             )
             continue
         if len(fresh) > 0:
-            print(f'[{tag}] Uploading {len(fresh)} new wheel(s) to {owner}/{name}.', flush=True)
+            logger.info(f'[{tag}] Uploading {len(fresh)} new wheel(s) to {owner}/{name}.')
             run([
                 'gh', 'release', 'upload', tag,
                 '--repo', f'{owner}/{name}',
@@ -311,10 +312,9 @@ def upload_wheels(wheelhouse: Path, tag_prefix: str, owner: str, name: str) -> l
             ])
             uploaded.extend(fresh)
         if len(repair) > 0:
-            print(
+            logger.warning(
                 f'[{tag}] Re-uploading {len(repair)} zero-byte asset(s) left by an '
-                f'interrupted prior upload.',
-                flush=True,
+                f'interrupted prior upload.'
             )
             run([
                 'gh', 'release', 'upload', tag,
@@ -438,7 +438,7 @@ def push_branch(worktree: Path, branch: str, owner: str, name: str) -> None:
         env = os.environ.copy()
         env['GIT_ASKPASS'] = askpass.name
         env['GIT_TERMINAL_PROMPT'] = '0'
-        print(f'>> git push https://github.com/{owner}/{name}.git {branch} (token auth)', flush=True)
+        logger.info(f'>> git push https://github.com/{owner}/{name}.git {branch} (token auth)')
         proc = subprocess.run(
             ['git', 'push', url, branch],
             cwd=worktree, env=env, capture_output=True, text=True,
@@ -498,7 +498,7 @@ def deploy_pages(pages_dir: Path, owner: str, name: str, branch: str = 'gh-pages
                 # a pathspec error. The physical worktree.iterdir() sweep below removes the
                 # carried-over files regardless, so a non-empty index is the only case that
                 # needs unstaging here; tolerate the empty-index exit.
-                print('>> git rm -rf . (tolerating empty orphan index)', flush=True)
+                logger.info('>> git rm -rf . (tolerating empty orphan index)')
                 subprocess.run(['git', 'rm', '-rf', '.'], cwd=worktree)
 
             for entry in worktree.iterdir():
@@ -523,7 +523,7 @@ def deploy_pages(pages_dir: Path, owner: str, name: str, branch: str = 'gh-pages
                 ['git', 'status', '--porcelain'], cwd=worktree, capture_output=True, text=True,
             )
             if status.stdout.strip() == '':
-                print(f'No changes to publish to {owner}/{name}@{branch}.', flush=True)
+                logger.info(f'No changes to publish to {owner}/{name}@{branch}.')
             else:
                 run([
                     'git', '-c', 'user.email=concomtorch-ci@localhost',
@@ -562,9 +562,11 @@ def main() -> int:
                              'keyring user. Missing file is a no-op.')
     args = parser.parse_args()
 
+    setup_logging('release')
+
     applied = load_dotenv(args.dotenv)
     if 'GH_TOKEN' in applied:
-        print(f'Loaded GH_TOKEN from {args.dotenv}.', flush=True)
+        logger.info(f'Loaded GH_TOKEN from {args.dotenv}.')
 
     if args.repo is not None:
         if '/' not in args.repo:
@@ -572,7 +574,7 @@ def main() -> int:
         owner, name = args.repo.split('/', 1)
     else:
         owner, name = detect_repo_slug()
-    print(f'Repo: {owner}/{name}', flush=True)
+    logger.info(f'Repo: {owner}/{name}')
 
     if not args.skip_upload:
         upload_wheels(args.wheelhouse, args.tag_prefix, owner, name)

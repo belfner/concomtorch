@@ -17,11 +17,17 @@ import subprocess
 import sys
 from pathlib import Path
 
+from loguru import logger
+
 from docker_pool import (
     build_image,
     cuda_tag_parts,
     image_tag,
     list_resident,
+)
+from logging_setup import (
+    setup_logging,
+    subprocess_log_path,
 )
 
 # cibuildwheel resolves test-sources against its own process working directory
@@ -55,9 +61,75 @@ def compute_cibw_build_pattern(py_abis: list[str]) -> str:
     return ' '.join(f'{abi}-manylinux_x86_64' for abi in normalize_abis(py_abis))
 
 
-def run(cmd: list[str], *, env: dict | None = None, cwd: Path | None = None) -> None:
-    print('>>', ' '.join(shlex.quote(c) for c in cmd), flush=True)
-    subprocess.check_call(cmd, env=env, cwd=cwd)
+def run(
+    cmd: list[str],
+    *,
+    env: dict | None = None,
+    cwd: Path | None = None,
+    transcript: Path | None = None,
+) -> None:
+    """
+    Run a subprocess, streaming its merged output to the console and a transcript.
+
+    The command line is logged through loguru (so the structured
+    orchestration record lands in the component's rotating log file and
+    on stdout). When ``transcript`` is given, a single info line names
+    that file, then the child's merged stdout and stderr are written
+    verbatim both to the real console for live progress and to the
+    transcript file, which holds the full cibuildwheel build, repair, and
+    in-container pytest output. The bulky child stream is deliberately
+    kept out of the component log so the structured records stay
+    readable.
+
+    Parameters
+    ----------
+    cmd : list[str]
+        The command and arguments to execute.
+    env : dict, optional
+        Environment for the child process, by default the inherited one.
+    cwd : Path, optional
+        Working directory for the child process, by default the inherited one.
+    transcript : Path, optional
+        Destination file for the verbatim child output. When None the
+        child output is streamed to the console only.
+
+    Raises
+    ------
+    subprocess.CalledProcessError
+        When the child process exits with a non-zero status.
+    """
+    logger.info('>> ' + ' '.join(shlex.quote(c) for c in cmd))
+    proc = subprocess.Popen(
+        cmd,
+        env=env,
+        cwd=cwd,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        bufsize=1,
+    )
+    assert proc.stdout is not None
+    sink = None
+    if transcript is not None:
+        transcript.parent.mkdir(parents=True, exist_ok=True)
+        sink = transcript.open('w', encoding='utf-8')
+        logger.info(f'subprocess output is being saved to {transcript}')
+    try:
+        with proc.stdout:
+            for line in proc.stdout:
+                sys.stdout.write(line)
+                sys.stdout.flush()
+                if sink is not None:
+                    sink.write(line)
+                    sink.flush()
+    finally:
+        if sink is not None:
+            sink.close()
+    returncode = proc.wait()
+    if transcript is not None:
+        logger.info(f'subprocess output saved to {transcript} (exit {returncode})')
+    if returncode != 0:
+        raise subprocess.CalledProcessError(returncode, cmd)
 
 
 def preflight_buildable(
@@ -138,18 +210,18 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> int:
     args = parse_args()
+    setup_logging('build_wheel')
     cuda_major_minor, _ = cuda_tag_parts(args.cuda_variant)
 
     project_dir = Path(args.project_dir).resolve()
     output_dir = Path(args.output_dir).resolve()
 
     if args.skip_tests and output_dir.name == 'wheelhouse':
-        print(
+        logger.error(
             '--skip-tests refuses to write into a "wheelhouse" directory. A '
             'skipped-test wheel is unverified; pass --output-dir to an explicit '
             'scratch directory (e.g. scratch-wheelhouse) so it cannot be mistaken '
-            'for a verified artifact or picked up by the publish path.',
-            file=sys.stderr,
+            'for a verified artifact or picked up by the publish path.'
         )
         return 2
 
@@ -159,13 +231,12 @@ def main() -> int:
     resident = {info.cuda_variant for info in list_resident()}
     if args.cuda_variant not in resident:
         if args.ensure_image:
-            print(f'Image {tag} not found; building.', flush=True)
+            logger.info(f'Image {tag} not found; building.')
             build_image(args.cuda_variant)
         else:
-            print(
+            logger.error(
                 f'Image {tag} not resident. Either run ci/docker_pool.py ensure {args.cuda_variant} '
-                f'first or pass --ensure-image.',
-                file=sys.stderr,
+                f'first or pass --ensure-image.'
             )
             return 2
 
@@ -252,23 +323,27 @@ def main() -> int:
     missing = preflight_buildable(project_dir, args.py_abis, cibw_env, cwd=REPO_ROOT)
     if len(missing) > 0:
         cibw_version = importlib.metadata.version('cibuildwheel')
-        print(
+        logger.error(
             f'cibuildwheel {cibw_version} will not build these requested ABIs: '
             f'{" ".join(missing)}. The pinned cibuildwheel cannot target them; '
             f'adjust the cibuildwheel pin in the repo-root pyproject.toml or the '
-            f'--py request.',
-            file=sys.stderr,
+            f'--py request.'
         )
         return 3
 
+    transcript = subprocess_log_path(
+        'build_wheel',
+        tag=f'{args.cuda_variant}-torch{args.torch_version}-{"+".join(normalize_abis(args.py_abis))}',
+    )
     run(
         [sys.executable, '-m', 'cibuildwheel', '--platform', 'linux',
          '--output-dir', str(output_dir), str(project_dir)],
         env=cibw_env,
         cwd=REPO_ROOT,
+        transcript=transcript,
     )
 
-    print('\nWheels written to:', output_dir, flush=True)
+    logger.success(f'Wheels written to: {output_dir}')
     return 0
 
 

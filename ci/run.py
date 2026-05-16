@@ -26,6 +26,7 @@ import sys
 import time
 from pathlib import Path
 
+from loguru import logger
 from packaging.version import Version
 
 from detect import (
@@ -37,6 +38,7 @@ from docker_pool import (
     ensure_images_parallel,
     evict_lru,
 )
+from logging_setup import setup_logging
 from notify import notify
 from plan import (
     compute_plan,
@@ -113,7 +115,7 @@ def build_one(
         '--project-dir', str(REPO_ROOT / 'package'),
         '--output-dir', str(output_dir),
     ]
-    print('>>', ' '.join(cmd), flush=True)
+    logger.info('>> ' + ' '.join(cmd))
     result = subprocess.run(cmd)
     return result.returncode == 0
 
@@ -123,7 +125,7 @@ def publish(output_dir: Path, serve_root: Path) -> None:
     Move any wheels in output_dir into serve_root and regenerate the two-layer PEP 503 tree.
     """
     moved = move_new_wheels(output_dir, serve_root / 'files')
-    print(f'Moved {len(moved)} wheels into {serve_root / "files"}', flush=True)
+    logger.info(f'Moved {len(moved)} wheels into {serve_root / "files"}')
     groups = collect(serve_root)
     render_index_tree(serve_root, groups)
 
@@ -152,6 +154,7 @@ def main() -> int:
                              "'<prefix>-<cuda>-torch<minor>'.")
     args = parser.parse_args()
 
+    setup_logging('run')
     started = time.monotonic()
 
     matrix = load_matrix(args.matrix)
@@ -177,9 +180,9 @@ def main() -> int:
     publishes_independently = args.publish_mode == 'github-pages'
 
     if have_builds:
-        print(render_plan_table(groups))
+        logger.info(f'Build plan:\n{render_plan_table(groups)}')
     else:
-        print('Nothing to build.')
+        logger.info('Nothing to build.')
         if not publishes_independently:
             # local mode republishes inside the build loop, so there is nothing to
             # retry across ticks when the plan is empty.
@@ -193,25 +196,26 @@ def main() -> int:
 
     if have_builds:
         active_cuda = sorted({cuda for _, cuda, _ in groups})
-        print(f'\nActive cuda variants this tick: {active_cuda}', flush=True)
+        logger.info(f'Active cuda variants this tick: {active_cuda}')
 
         image_failures: list[str] = []
         if not args.skip_image_warmup:
             _success, image_failures = ensure_images_parallel(active_cuda, max_parallel=max_parallel)
             if len(image_failures) > 0:
-                print(f'Image warmup failed for: {image_failures}. Groups using those variants will be skipped.',
-                      flush=True)
+                logger.warning(
+                    f'Image warmup failed for: {image_failures}. Groups using those variants will be skipped.'
+                )
 
         skip_cuda = set(image_failures)
         for torch, cuda, pys in groups:
             if cuda in skip_cuda:
                 failures.append((torch, cuda))
-                print(f'  - skipping {torch} / {cuda}: image unavailable', flush=True)
+                logger.warning(f'skipping {torch} / {cuda}: image unavailable')
                 continue
             ok = build_one(torch, cuda, pys, args.wheelhouse, compute_min)
             if not ok:
                 failures.append((torch, cuda))
-                print(f'  ! build/test failed for {torch} / {cuda}', flush=True)
+                logger.error(f'build/test failed for {torch} / {cuda}')
                 continue
             if args.publish_mode == 'local':
                 publish(args.wheelhouse, args.serve_root)
@@ -231,18 +235,18 @@ def main() -> int:
                 '--wheelhouse', str(args.wheelhouse),
                 '--tag-prefix', args.release_tag_prefix,
             ]
-            print('>>', ' '.join(release_cmd), flush=True)
+            logger.info('>> ' + ' '.join(release_cmd))
             release_result = subprocess.run(release_cmd)
             if release_result.returncode != 0:
                 publish_failed = True
-                print('  ! release step failed', flush=True)
+                logger.error('release step failed')
         else:
-            print('github-pages mode: wheelhouse empty, nothing to publish.', flush=True)
+            logger.info('github-pages mode: wheelhouse empty, nothing to publish.')
 
     if have_builds and not args.skip_eviction:
         evicted = evict_lru(max_resident, keep=set(active_cuda))
         if len(evicted) > 0:
-            print(f'Evicted {len(evicted)} image(s): {evicted}', flush=True)
+            logger.info(f'Evicted {len(evicted)} image(s): {evicted}')
 
     elapsed = time.monotonic() - started
     summary = (
@@ -250,7 +254,10 @@ def main() -> int:
         f'{len(failures)} build failed, '
         f'publish {"failed" if publish_failed else "ok"}, {elapsed:.0f}s'
     )
-    print(summary)
+    if len(failures) > 0 or publish_failed:
+        logger.error(summary)
+    else:
+        logger.success(summary)
 
     if len(failures) > 0 or publish_failed:
         lines = [f'  {t} / {c}' for t, c in failures]

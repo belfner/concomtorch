@@ -10,6 +10,10 @@ import sys
 import urllib.error
 import urllib.request
 
+from loguru import logger
+
+from logging_setup import setup_logging
+
 
 def notify(message: str, title: str | None = None, priority: str = 'default') -> bool:
     """
@@ -31,7 +35,7 @@ def notify(message: str, title: str | None = None, priority: str = 'default') ->
     """
     url = os.environ.get('CONCOMTORCH_NTFY_URL', '').strip()
     if url == '':
-        print('CONCOMTORCH_NTFY_URL not set; skipping notification.', file=sys.stderr)
+        logger.warning('CONCOMTORCH_NTFY_URL not set; skipping notification.')
         return False
     headers = {'Priority': priority}
     if title is not None:
@@ -41,7 +45,7 @@ def notify(message: str, title: str | None = None, priority: str = 'default') ->
         with urllib.request.urlopen(req, timeout=10) as resp:
             return 200 <= resp.status < 300
     except (urllib.error.URLError, OSError) as exc:
-        print(f'ntfy POST failed: {exc}', file=sys.stderr)
+        logger.error(f'ntfy POST failed: {exc}')
         return False
 
 
@@ -52,6 +56,7 @@ def main() -> int:
                         choices=['min', 'low', 'default', 'high', 'urgent'])
     parser.add_argument('message')
     args = parser.parse_args()
+    setup_logging('notify')
     ok = notify(args.message, title=args.title, priority=args.priority)
     return 0 if ok else 1
 
