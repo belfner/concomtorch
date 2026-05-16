@@ -8,6 +8,7 @@ down the block-boundary, parity, and bottom-right odd/odd corner
 behaviors of the block labeler. A still-broken case
 fails loudly here; nothing is xfailed or soft-passed.
 """
+
 from __future__ import annotations
 
 import os
