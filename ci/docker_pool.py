@@ -24,7 +24,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 
-CUDA_TAG_RE = re.compile(r'^cu(?P<major>\d{1,2})(?P<minor>\d)$')
+CUDA_TAG_RE = re.compile(r'^cu(?P<major>\d+)(?P<minor>\d)$')
 
 IMAGE_NAMESPACE = 'concomtorch-manylinux'
 DEFAULT_MANYLINUX_IMAGE = 'quay.io/pypa/manylinux_2_28_x86_64'
@@ -34,10 +34,12 @@ def cuda_tag_parts(cuda_variant: str) -> tuple[str, str]:
     """
     Derive the CUDA version strings the Dockerfile needs from a cuXYZ tag.
 
-    The PyTorch cuda tag scheme is uniform: the trailing digit is the CUDA minor and the
-    preceding digits are the major (e.g. ``cu126`` -> 12.6, ``cu132`` -> 13.2), so both the
-    dotted version used for ``CUDA_HOME`` and the NVIDIA package suffix are pure functions of
-    the tag and require no per-variant table.
+    The PyTorch cuda tag scheme is uniform: the single trailing digit is the CUDA minor and
+    every preceding digit is the major (e.g. ``cu92`` -> 9.2, ``cu126`` -> 12.6,
+    ``cu132`` -> 13.2), so both the dotted version used for ``CUDA_HOME`` and the NVIDIA
+    package suffix are pure functions of the tag and require no per-variant table. The
+    inverse, :func:`detect.dotted_to_cu_tag`, rejects any CUDA version whose minor is more
+    than one digit, so a tag reaching this parser always has a single-digit minor.
 
     Parameters
     ----------
@@ -315,7 +317,6 @@ def evict_lru(max_resident: int, keep: set[str]) -> list[str]:
     if len(resident) <= max_resident:
         return []
 
-    keepers = [info for info in resident if info.cuda_variant in keep]
     evictable = [info for info in resident if info.cuda_variant not in keep]
     evictable.sort(key=lambda i: i.created)  # oldest first
 
@@ -331,7 +332,6 @@ def evict_lru(max_resident: int, keep: set[str]) -> list[str]:
     for info in evictable[:to_delete]:
         if delete_image(info.tag):
             deleted.append(info.tag)
-    _ = keepers
     return deleted
 
 

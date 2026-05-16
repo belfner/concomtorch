@@ -31,10 +31,7 @@ from collections import defaultdict
 from collections.abc import Callable
 from pathlib import Path
 
-from plan import (
-    WheelKey,
-    parse_wheel,
-)
+from plan import parse_wheel
 
 PROJECT_NAME = 'concomtorch'
 

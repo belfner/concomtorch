@@ -32,41 +32,39 @@ class Combo:
         return (self.torch, self.cuda, self.py)
 
 
-def cu_tag_to_dotted(cu_tag: str) -> str:
+def dotted_to_cu_tag(dotted: str) -> str:
     """
-    Translate a PyTorch cuXYZ tag to the dotted form torch-wheel-index uses.
+    Translate a dotted CUDA version to its PyTorch ``cuXYZ`` tag.
+
+    PyTorch's tag scheme encodes the CUDA minor as a single trailing digit
+    (``12.1`` -> ``cu121``, ``11.8`` -> ``cu118``). A minor of two or more
+    digits has no representation in that scheme, so it is rejected here, at
+    catalog-enumeration time, rather than silently producing a tag that the
+    downstream ``cu<major><minor>`` parsers would decode back to the wrong
+    version.
 
     Parameters
     ----------
-    cu_tag : str
-        e.g. 'cu121'.
+    dotted : str
+        Dotted CUDA version, e.g. ``'12.1'``.
 
     Returns
     -------
     str
-        e.g. '12.1'.
-    """
-    if not cu_tag.startswith('cu'):
-        raise ValueError(f'Expected cu### tag, got {cu_tag!r}')
-    digits = cu_tag[2:]
-    return f'{digits[:-1]}.{digits[-1]}'
+        The ``cuXYZ`` tag, e.g. ``'cu121'``.
 
-
-def dotted_to_cu_tag(dotted: str) -> str:
+    Raises
+    ------
+    ValueError
+        When the minor component is not exactly one digit.
     """
-    Translate '12.1' to 'cu121'.
-    """
+    parts = dotted.split('.')
+    if len(parts) != 2 or len(parts[1]) != 1:
+        raise ValueError(
+            f"CUDA version {dotted!r} does not fit PyTorch's cu<major><minor> "
+            'tag scheme (minor must be a single digit)'
+        )
     return 'cu' + dotted.replace('.', '')
-
-
-def cp_to_dotted(cp: str) -> str:
-    """
-    Translate 'cp310' to '3.10'.
-    """
-    if not cp.startswith('cp'):
-        raise ValueError(f'Expected cp### tag, got {cp!r}')
-    digits = cp[2:]
-    return f'{digits[:1]}.{digits[1:]}'
 
 
 def dotted_to_cp(dotted: str) -> str:
