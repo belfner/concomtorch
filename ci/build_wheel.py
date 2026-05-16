@@ -253,6 +253,17 @@ def main() -> int:
             f'--index-url https://download.pytorch.org/whl/{args.cuda_variant}/ && '
             'python -m pip install setuptools>=70.1.0 wheel ninja numpy'
         ),
+        # auditwheel grafts every non-excluded external shared lib into
+        # concomtorch.libs/ and rewrites _C.so's RUNPATH/DT_NEEDED to point at
+        # the mangled copy. The torch/c10 libs are excluded so the wheel binds
+        # to the torch the test/runtime venv installed. The CUDA runtime libs
+        # below must be excluded for the same reason: torch ships them itself
+        # (bundled in torch/lib for cu12x torch<=2.10, or via the nvidia-*-cuXX
+        # dependency wheels for cu13x and newer torch). Letting auditwheel graft
+        # a second copy puts two libcudart.so.<major> in one process; the CUDA
+        # runtime double-initialises and the interpreter SIGSEGVs at
+        # `import concomtorch`. The globs match the SONAME under both the cu12x
+        # (.so.12) and cu13x (.so.13) majors.
         'CIBW_REPAIR_WHEEL_COMMAND_LINUX': (
             'auditwheel repair -w {dest_dir} {wheel} '
             '--exclude libtorch.so '
@@ -264,7 +275,29 @@ def main() -> int:
             '--exclude libtorch_global_deps.so '
             '--exclude libcaffe2_nvrtc.so '
             '--exclude libtorch_cuda_linalg.so '
-            '--exclude libshm.so'
+            '--exclude libshm.so '
+            '--exclude "libcudart.so.*" '
+            '--exclude "libcublas.so.*" '
+            '--exclude "libcublasLt.so.*" '
+            '--exclude "libcudnn.so.*" '
+            '--exclude "libcudnn_*.so.*" '
+            '--exclude "libcufft.so.*" '
+            '--exclude "libcufftw.so.*" '
+            '--exclude "libcurand.so.*" '
+            '--exclude "libcusolver.so.*" '
+            '--exclude "libcusolverMg.so.*" '
+            '--exclude "libcusparse.so.*" '
+            '--exclude "libcusparseLt.so.*" '
+            '--exclude "libnvrtc.so.*" '
+            '--exclude "libnvrtc-builtins.so.*" '
+            '--exclude "libnvJitLink.so.*" '
+            '--exclude "libnccl.so.*" '
+            '--exclude "libcupti.so.*" '
+            '--exclude "libnvshmem_host.so.*" '
+            '--exclude "libcufile.so.*" '
+            '--exclude "libnvToolsExt.so.*" '
+            '--exclude "libnvpl_*.so.*" '
+            '--exclude "libcuda.so.*"'
         ),
         'CIBW_ENVIRONMENT': (
             f'CUDA_HOME=/usr/local/cuda-{cuda_major_minor} '
