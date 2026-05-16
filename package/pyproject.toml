@@ -55,7 +55,7 @@ package-dir = {"" = "src"}
 license-files = ["LICENSE"]
 
 [tool.setuptools.package-data]
-concomtorch = ["*.so", "*.pyd"]
+concomtorch = ["*.so", "*.pyd", "py.typed"]
 
 [tool.black]
 line-length = 120
