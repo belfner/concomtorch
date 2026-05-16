@@ -92,11 +92,10 @@ def load_matrix(path: Path) -> dict:
     """
     with path.open() as fh:
         data = yaml.safe_load(fh)
-    required = {'torch_min', 'python_abis', 'cuda_variants'}
+    required = {'torch_min', 'python_min'}
     missing = required - set(data.keys())
     if len(missing) > 0:
         raise ValueError(f'matrix.yaml missing required keys: {sorted(missing)}')
-    data.setdefault('exclude', [])
     return data
 
 
@@ -119,42 +118,12 @@ def fetch_catalog() -> list[dict]:
     return json.loads(result.stdout)
 
 
-def is_excluded(torch_ver: str, cuda: str, exclude_rules: list[dict]) -> bool:
-    """
-    Check whether a (torch, cuda) pair is excluded by any rule.
-
-    Each rule may contain `cuda` (string equality required), `torch_min` (skip when
-    torch >= value) and/or `torch_max` (skip when torch <= value).
-
-    Parameters
-    ----------
-    torch_ver : str
-        Torch version, e.g. '2.4.1'.
-    cuda : str
-        CUDA variant tag, e.g. 'cu121'.
-    exclude_rules : list[dict]
-        Rules from matrix.yaml.
-
-    Returns
-    -------
-    bool
-        True if this pair should be skipped.
-    """
-    tv = Version(torch_ver)
-    for rule in exclude_rules:
-        if rule.get('cuda') != cuda:
-            continue
-        if 'torch_min' in rule and tv < Version(rule['torch_min']):
-            continue
-        if 'torch_max' in rule and tv > Version(rule['torch_max']):
-            continue
-        return True
-    return False
-
-
 def enumerate_wanted(matrix: dict, catalog: list[dict]) -> list[Combo]:
     """
-    Intersect the catalog with matrix.yaml constraints.
+    Select every catalog row at or above the torch and python floors.
+
+    For each torch version >= ``torch_min``, every cuda variant and every python ABI
+    >= ``python_min`` that PyTorch publishes is included.
 
     Parameters
     ----------
@@ -168,9 +137,8 @@ def enumerate_wanted(matrix: dict, catalog: list[dict]) -> list[Combo]:
     list[Combo]
         Sorted list of valid combinations.
     """
-    wanted_cuda = set(matrix['cuda_variants'])
-    wanted_py = set(matrix['python_abis'])
     torch_min = Version(matrix['torch_min'])
+    python_min = Version(matrix['python_min'])
 
     seen: set[tuple[str, str, str]] = set()
     out: list[Combo] = []
@@ -182,11 +150,9 @@ def enumerate_wanted(matrix: dict, catalog: list[dict]) -> list[Combo]:
         cuda = dotted_to_cu_tag(cuda_dotted)
         py = dotted_to_cp(py_dotted)
 
-        if cuda not in wanted_cuda or py not in wanted_py:
-            continue
         if Version(torch_ver) < torch_min:
             continue
-        if is_excluded(torch_ver, cuda, matrix['exclude']):
+        if Version(py_dotted) < python_min:
             continue
         combo = Combo(torch=torch_ver, cuda=cuda, py=py)
         if combo.key() in seen:

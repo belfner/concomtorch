@@ -150,7 +150,7 @@ def group_by_torch_cuda(plan: list[Combo]) -> list[tuple[str, str, list[str]]]:
     for c in plan:
         groups[(c.torch, c.cuda)].append(c.py)
     out = [(torch, cuda, sorted(pys)) for (torch, cuda), pys in groups.items()]
-    out.sort()
+    out.sort(key=lambda g: (Version(g[0]), g[1]))
     return out
 
 

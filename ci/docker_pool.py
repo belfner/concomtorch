@@ -10,6 +10,7 @@ resident count exceeds another cap.
 from __future__ import annotations
 
 import json
+import re
 import shlex
 import subprocess
 import sys
@@ -23,19 +24,42 @@ from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 
-CUDA_MATRIX = {
-    'cu118': ('11.8', '11-8'),
-    'cu121': ('12.1', '12-1'),
-    'cu124': ('12.4', '12-4'),
-    'cu126': ('12.6', '12-6'),
-    'cu127': ('12.7', '12-7'),
-    'cu128': ('12.8', '12-8'),
-    'cu129': ('12.9', '12-9'),
-    'cu130': ('13.0', '13-0'),
-}
+CUDA_TAG_RE = re.compile(r'^cu(?P<major>\d{1,2})(?P<minor>\d)$')
 
 IMAGE_NAMESPACE = 'concomtorch-manylinux'
 DEFAULT_MANYLINUX_IMAGE = 'quay.io/pypa/manylinux_2_28_x86_64'
+
+
+def cuda_tag_parts(cuda_variant: str) -> tuple[str, str]:
+    """
+    Derive the CUDA version strings the Dockerfile needs from a cuXYZ tag.
+
+    The PyTorch cuda tag scheme is uniform: the trailing digit is the CUDA minor and the
+    preceding digits are the major (e.g. ``cu126`` -> 12.6, ``cu132`` -> 13.2), so both the
+    dotted version used for ``CUDA_HOME`` and the NVIDIA package suffix are pure functions of
+    the tag and require no per-variant table.
+
+    Parameters
+    ----------
+    cuda_variant : str
+        CUDA variant tag, e.g. ``cu126``.
+
+    Returns
+    -------
+    tuple of (str, str)
+        ``(major_minor_dotted, pkg_suffix)``, e.g. ``('12.6', '12-6')``.
+
+    Raises
+    ------
+    ValueError
+        If the tag does not match the ``cu<major><minor>`` scheme.
+    """
+    m = CUDA_TAG_RE.match(cuda_variant)
+    if m is None:
+        raise ValueError(f'Malformed cuda variant tag: {cuda_variant!r} (expected cu<major><minor>)')
+    major = m.group('major')
+    minor = m.group('minor')
+    return f'{major}.{minor}', f'{major}-{minor}'
 
 
 def image_tag(cuda_variant: str) -> str:
@@ -125,9 +149,7 @@ def dockerfile_text(cuda_variant: str, manylinux_image: str = DEFAULT_MANYLINUX_
     """
     Render the Dockerfile for one cuda variant.
     """
-    if cuda_variant not in CUDA_MATRIX:
-        raise ValueError(f'Unknown cuda variant: {cuda_variant}')
-    cuda_major_minor, cuda_pkg_suffix = CUDA_MATRIX[cuda_variant]
+    cuda_major_minor, cuda_pkg_suffix = cuda_tag_parts(cuda_variant)
     return f"""\
 # syntax=docker/dockerfile:1
 ARG BASE_IMAGE={manylinux_image}

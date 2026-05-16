@@ -17,8 +17,8 @@ import sys
 from pathlib import Path
 
 from docker_pool import (
-    CUDA_MATRIX,
     build_image,
+    cuda_tag_parts,
     image_tag,
     list_resident,
 )
@@ -57,7 +57,6 @@ def parse_args() -> argparse.Namespace:
     p.add_argument('--torch', dest='torch_version', required=True,
                    help='PyTorch version spec, e.g. 2.4.1')
     p.add_argument('--cuda', dest='cuda_variant', required=True,
-                   choices=sorted(CUDA_MATRIX.keys()),
                    help='CUDA variant matching PyTorch wheel channel, e.g. cu121')
     p.add_argument('--py', dest='py_abis', nargs='+', required=True,
                    help='One or more CPython ABI tags to build, e.g. cp310 cp311 cp312')
@@ -72,7 +71,7 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> int:
     args = parse_args()
-    cuda_major_minor, _ = CUDA_MATRIX[args.cuda_variant]
+    cuda_major_minor, _ = cuda_tag_parts(args.cuda_variant)
 
     project_dir = Path(args.project_dir).resolve()
     output_dir = Path(args.output_dir).resolve()

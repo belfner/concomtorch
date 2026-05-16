@@ -1,11 +1,16 @@
 # Build matrix for concomtorch wheels.
 #
-# Hand-curated cross product of (torch_version x cuda_variant x python_abi).
-# ci/detect.py intersects this with what PyTorch actually publishes on
-# download.pytorch.org via torch-wheel-index, then ci/plan.py diffs against
-# the on-disk wheelhouse to decide what to build.
+# torch_min selects which torch versions to target. For every selected torch
+# version, ci/detect.py builds every cuda variant and every python ABI that
+# PyTorch actually publishes on download.pytorch.org (via torch-wheel-index),
+# subject only to the python_min floor. ci/plan.py then diffs the result
+# against the on-disk wheelhouse to decide what to build.
 
 torch_min: '2.6.0'
+
+# Lowest CPython minor to build. Every python ABI PyTorch publishes for a
+# selected torch version at or above this is included.
+python_min: '3.10'
 
 # Docker image pool tuning.
 # max_parallel_builds caps concurrent `docker build` invocations during warmup.
@@ -14,28 +19,3 @@ torch_min: '2.6.0'
 docker:
   max_parallel_builds: 2
   max_resident_images: 3
-
-
-python_abis:
-  - cp310
-  - cp311
-  - cp312
-  - cp313
-
-cuda_variants:
-  - cu121
-  - cu124
-  - cu126
-  - cu128
-  - cu129
-  - cu130
-
-# Exclusions express "this (torch, cuda) pair is invalid / unavailable / unwanted".
-# torch_min applies when torch >= the given value; torch_max applies when torch <= the given value.
-exclude:
-  - {cuda: cu121, torch_min: '2.7.0'}
-  - {cuda: cu124, torch_min: '2.8.0'}
-  - {cuda: cu126, torch_max: '2.5.999'}
-  - {cuda: cu128, torch_max: '2.6.999'}
-  - {cuda: cu129, torch_max: '2.7.999'}
-  - {cuda: cu130, torch_max: '2.8.999'}

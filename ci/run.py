@@ -21,6 +21,8 @@ import sys
 import time
 from pathlib import Path
 
+from packaging.version import Version
+
 from detect import (
     enumerate_wanted,
     fetch_catalog,
@@ -46,6 +48,47 @@ from publish import (
 
 CI_DIR = Path(__file__).resolve().parent
 REPO_ROOT = CI_DIR.parent
+
+
+def render_plan_table(groups: list[tuple[str, str, list[str]]]) -> str:
+    """
+    Render the build plan as an aligned text table sorted by torch version then cuda.
+
+    Parameters
+    ----------
+    groups : list of tuple
+        (torch_version, cuda_variant, [py_abi, ...]) tuples from group_by_torch_cuda.
+
+    Returns
+    -------
+    str
+        The formatted table including header, rows, and a totals footer.
+    """
+    rows = sorted(groups, key=lambda g: (Version(g[0]), g[1]))
+    headers = ('Torch', 'CUDA', 'Python ABIs', 'Wheels')
+    cells = [
+        (torch, cuda, ' '.join(pys), str(len(pys)))
+        for torch, cuda, pys in rows
+    ]
+    widths = [
+        max(len(headers[i]), *(len(c[i]) for c in cells)) if len(cells) > 0 else len(headers[i])
+        for i in range(4)
+    ]
+
+    def fmt(c: tuple[str, str, str, str]) -> str:
+        return '  '.join([
+            c[0].ljust(widths[0]),
+            c[1].ljust(widths[1]),
+            c[2].ljust(widths[2]),
+            c[3].rjust(widths[3]),
+        ])
+
+    sep = '  '.join('-' * w for w in widths)
+    total_wheels = sum(len(pys) for _, _, pys in rows)
+    lines = [fmt(headers), sep]
+    lines += [fmt(c) for c in cells]
+    lines += [sep, f'Total: {len(rows)} (torch, cuda) groups, {total_wheels} wheels']
+    return '\n'.join(lines)
 
 
 def build_one(torch_version: str, cuda_variant: str, py_abis: list[str], output_dir: Path) -> bool:
@@ -122,9 +165,7 @@ def main() -> int:
         print('Nothing to build. Exiting.')
         return 0
 
-    print(f'Plan: {len(groups)} (torch, cuda) groups, {sum(len(g[2]) for g in groups)} wheels total.')
-    for torch, cuda, pys in groups:
-        print(f'  - {torch} / {cuda} / {" ".join(pys)}')
+    print(render_plan_table(groups))
 
     if args.dry_run:
         return 0
