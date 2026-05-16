@@ -24,13 +24,17 @@ GPU-accelerated connected component labeling for PyTorch tensors using the state
 
 ### Install the published wheel
 
-Wheels are published behind per-CUDA simple indexes. Pick the channel matching
-the CUDA build of your installed PyTorch; the wheel pins `torch==X.Y.*` so pip
-selects the build for your torch minor automatically:
+Wheels are published behind a two-layer simple index keyed by CUDA variant and
+torch minor (`<cuda>/<torch_tag>/`). Pick the directory matching the CUDA build
+and torch minor of your installed PyTorch and pass it as the index URL. For
+example, CUDA 12.6 with torch 2.6:
 
 ```bash
-pip install concomtorch --extra-index-url https://belfner.github.io/concomtorch/cu126/
+pip install concomtorch --extra-index-url https://belfner.github.io/concomtorch/cu126/torch2_6/
 ```
+
+Browse `https://belfner.github.io/concomtorch/` to see the available CUDA
+variants and, under each, the torch channels.
 
 ### Install from source
 

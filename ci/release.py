@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Publish built wheels to GitHub Releases and push the per-cuda PEP 503 index to GitHub Pages.
+Publish built wheels to GitHub Releases and push the two-layer PEP 503 index tree to GitHub Pages.
 
 Wheels are partitioned across one GitHub Release per (cuda, torch_minor) combination, with
 tag ``<prefix>-<cuda>-torch<minor>`` (e.g. ``wheels-cu124-torch2.6``). This keeps each release
@@ -11,8 +11,9 @@ Flow:
     1. Resolve the GitHub repo slug (owner/name) from ``git remote get-url origin``.
     2. Group wheels in the wheelhouse by per-(cuda, torch_minor) release tag.
     3. For each bucket, ensure the release exists and upload any new wheels.
-    4. Render the per-cuda PEP 503 indexes; each ``<a href>`` points at the release that holds
-       that specific wheel,
+    4. Render the two-layer PEP 503 index tree (per-(cuda, torch_minor) roots under
+       ``<cuda>/<torch_tag>/``); each ``<a href>`` points at the release that holds that
+       specific wheel,
        ``https://github.com/<owner>/<repo>/releases/download/<prefix>-<cuda>-torch<minor>/<wheel>``.
     5. Sync the rendered tree into a checkout of the ``gh-pages`` branch and push.
 
@@ -41,9 +42,7 @@ from plan import (
 )
 from publish import (
     collect_from,
-    write_channel_project_page,
-    write_channel_root,
-    write_landing,
+    render_index_tree,
 )
 
 CI_DIR = Path(__file__).resolve().parent
@@ -336,10 +335,10 @@ def render_pages(
     """
     Write the PEP 503 tree into ``pages_dir`` with hrefs pointing at GitHub Release assets.
 
-    Each wheel's href resolves to the release that holds it: a wheel built for cu124/torch2.6
-    becomes ``https://github.com/<owner>/<name>/releases/download/<prefix>-cu124-torch2.6/<wheel>``.
-    The per-wheel URL is computed via :func:`tag_for_wheel` so the channel index correctly
-    fans out to one release per (cuda, torch_minor) bucket.
+    Each wheel's href resolves to the release that holds it: a wheel built for cu126/torch2.6
+    becomes ``https://github.com/<owner>/<name>/releases/download/<prefix>-cu126-torch2.6/<wheel>``.
+    The per-wheel URL is computed via :func:`tag_for_wheel` so each (cuda, torch_minor)
+    project page points at the matching release.
 
     Parameters
     ----------
@@ -362,11 +361,7 @@ def render_pages(
         return f'{base_download_url}/{tag}/{wheel.name}'
 
     groups = collect_from(wheelhouse)
-    for cuda, wheels in sorted(groups.items()):
-        write_channel_project_page(pages_dir, cuda, wheels, wheel_href)
-        write_channel_root(pages_dir, cuda)
-        print(f'Rendered {cuda} channel with {len(wheels)} wheel(s).', flush=True)
-    write_landing(pages_dir, list(groups.keys()))
+    render_index_tree(pages_dir, groups, wheel_href)
 
 
 @contextlib.contextmanager

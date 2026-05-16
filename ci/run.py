@@ -46,9 +46,7 @@ from plan import (
 from publish import (
     collect,
     move_new_wheels,
-    write_channel_project_page,
-    write_channel_root,
-    write_landing,
+    render_index_tree,
 )
 
 CI_DIR = Path(__file__).resolve().parent
@@ -122,15 +120,12 @@ def build_one(
 
 def publish(output_dir: Path, serve_root: Path) -> None:
     """
-    Move any wheels in output_dir into serve_root and regenerate per-cuda PEP 503 indexes.
+    Move any wheels in output_dir into serve_root and regenerate the two-layer PEP 503 tree.
     """
     moved = move_new_wheels(output_dir, serve_root / 'files')
     print(f'Moved {len(moved)} wheels into {serve_root / "files"}', flush=True)
     groups = collect(serve_root)
-    for cuda, wheels in groups.items():
-        write_channel_project_page(serve_root, cuda, wheels)
-        write_channel_root(serve_root, cuda)
-    write_landing(serve_root, list(groups.keys()))
+    render_index_tree(serve_root, groups)
 
 
 def main() -> int:

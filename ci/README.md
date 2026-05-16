@@ -2,11 +2,12 @@
 
 Self-hosted wheel build automation. Lives on one server, runs once a day, builds any
 (torch, cuda, py) combination that PyTorch publishes which is in `matrix.yaml` and not yet in the
-wheelhouse. Wheels carry PEP 440 local versions (`+cu121torch2.4`) and are published behind
-per-cuda PEP 503 simple indexes (one channel per cuda variant, mirroring PyTorch's
-`download.pytorch.org/whl/cu121` layout) that pip consumes via `--extra-index-url`. The torch
-minor pin lives in each wheel's `Requires-Dist`, so pip auto-selects the right wheel for the
-user's installed torch.
+wheelhouse. Wheels carry PEP 440 local versions (`+cu126torch2.6.1`) and are published behind
+a two-layer PEP 503 simple index keyed by cuda variant then torch minor
+(`<cuda>/<torch_tag>/`, e.g. `cu126/torch2_6/`) that pip consumes via `--extra-index-url`.
+The user selects the cuda variant and torch minor matching their installed PyTorch and passes
+that two-layer URL; the wheel for that bucket is the only `concomtorch` candidate, so a bare
+`pip install concomtorch` resolves it.
 
 ## Files
 
@@ -17,7 +18,7 @@ user's installed torch.
 | `plan.py` | Diff WANTED against wheelhouse contents, emit build plan grouped by (torch, cuda) |
 | `docker_pool.py` | List, build (parallel), and LRU-evict the manylinux+CUDA image cache |
 | `build_wheel.py` | Run cibuildwheel against a pre-built image for one (torch, cuda, py-abis) group |
-| `publish.py` | Move new wheels into the public serve root and regenerate per-cuda PEP 503 indexes |
+| `publish.py` | Move new wheels into the public serve root and regenerate the two-layer PEP 503 index tree |
 | `notify.py` | POST to ntfy.sh (or any compatible endpoint) on failure |
 | `run.py` | Orchestrator: detect -> plan -> warm images -> build -> publish -> evict -> notify |
 | `systemd/concomtorch-wheels.service` | Oneshot service that runs `run.py` |
@@ -37,25 +38,31 @@ user's installed torch.
     src/concomtorch/
   wheelhouse/                  # cibuildwheel output staging
   public/                      # web-served root
-    index.html                 # human landing page
-    cu121/
-      index.html               # PEP 503 channel root
-      concomtorch/
-        index.html             # PEP 503 project page
-    cu124/
+    index.html                 # human landing page (lists cuda variants)
+    cu126/
+      index.html               # browsable page (lists torch channels)
+      torch2_6/
+        index.html             # PEP 503 channel root
+        concomtorch/
+          index.html           # PEP 503 project page
+      torch2_7/
+        ...
+    cu128/
       ...
     files/*.whl
 ```
 
-caddy (or nginx) is pointed at `/srv/concomtorch/public/`. Users select the channel matching
-their installed torch CUDA build:
+caddy (or nginx) is pointed at `/srv/concomtorch/public/`. Users select the
+`<cuda>/<torch_tag>/` directory matching their installed PyTorch:
 
 ```
-pip install concomtorch --extra-index-url https://wheels.<your-domain>/cu121/
+pip install concomtorch --extra-index-url https://wheels.<your-domain>/cu126/torch2_6/
 ```
 
-The user picks the cuda variant; pip picks the torch minor automatically via the
-`torch==X.Y.*` requirement baked into each wheel at build time.
+The user picks both the cuda variant and the torch minor. That bucket holds only the wheels
+built for that (cuda, torch minor), so a bare `pip install concomtorch` resolves the right
+one. The `torch==X.Y.*` requirement baked into each wheel still pins the torch minor at
+install time.
 
 ## Bootstrap
 
@@ -111,7 +118,7 @@ Token scope:
 The repo slug is parsed from `git remote get-url origin`, so the clone must
 have an `origin` remote pointing at the GitHub repository. Enable GitHub Pages
 for the repository with the source set to the `gh-pages` branch; the published
-index is then served at `https://<owner>.github.io/<name>/<cuda>/`.
+index is then served at `https://<owner>.github.io/<name>/<cuda>/<torch_tag>/`.
 
 Without a usable token (or pre-configured `gh`/git credentials) the build
 phase still succeeds but the publish step fails the tick and notifies.
@@ -119,7 +126,7 @@ phase still succeeds but the publish step fails the tick and notifies.
 ### Alternative: local publish mode
 
 To self-host the index without GitHub, run with `--publish-mode local`. Wheels
-are moved into `<serve-root>/files` and per-CUDA PEP 503 indexes are
+are moved into `<serve-root>/files` and the two-layer PEP 503 index tree is
 regenerated there after each build (see the layout above); point caddy/nginx
 at `<serve-root>`. No `GH_TOKEN` is needed in this mode. Set it in the systemd
 unit, e.g.:
