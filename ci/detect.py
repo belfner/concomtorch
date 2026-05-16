@@ -3,8 +3,8 @@
 Enumerate (torch_version, cuda_variant, py_abi) combinations that PyTorch publishes and the
 local matrix.yaml allows.
 
-Uses the torch-wheel-index package to query download.pytorch.org. The output is the WANTED set,
-not the build plan: ci/plan.py subtracts what already exists in the wheelhouse.
+Uses the torch-wheel-index package to query download.pytorch.org. The output is the WANTED set;
+ci/plan.py derives the build plan from it by subtracting wheels already present in the wheelhouse.
 """
 from __future__ import annotations
 

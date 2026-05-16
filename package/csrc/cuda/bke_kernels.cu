@@ -160,8 +160,8 @@ __global__ void bke_init_kernel(
 
     // Pixel (1,1) - bottom-right
     if (y + 1 < height && x + 1 < width && input[xI + step_I + 1] > 0) {
-        // Record only the info-byte foreground bit; this pixel's checked
-        // neighbors are all out of bounds here, so the bitset stays as-is.
+        // Record pixel (1,1)'s foreground state in the info byte only; it
+        // contributes no checked-neighbor link to the bitset here.
         info_byte |= (1 << 3);
     }
 

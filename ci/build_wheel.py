@@ -4,7 +4,7 @@ Run cibuildwheel against a pre-built manylinux+CUDA image to produce wheels for 
 (torch_version, cuda_variant, py_abis) combination.
 
 Image lifecycle (build, prune) lives in ci/docker_pool.py; this script assumes the image exists.
-Wheels emerge named with the PEP 440 local version `+cu{N}torch{X.Y}` because setup.py reads
+Wheels emerge named with the PEP 440 local version `+cu{N}torch{X.Y.Z}` because setup.py reads
 CONCOMTORCH_CUDA / CONCOMTORCH_TORCH from CIBW_ENVIRONMENT.
 """
 from __future__ import annotations
@@ -241,6 +241,12 @@ def main() -> int:
             return 2
 
     cibw_env = os.environ.copy()
+    # Scrub orchestration secrets before they reach the cibuildwheel
+    # subprocess, whose merged stdout/stderr is streamed verbatim to the
+    # console and the transcript file. The build and in-container test need
+    # only the CIBW_* inputs set below.
+    for _secret_key in ("GH_TOKEN", "GITHUB_TOKEN", "CONCOMTORCH_NTFY_URL"):
+        cibw_env.pop(_secret_key, None)
     cibw_env.update({
         'CIBW_MANYLINUX_X86_64_IMAGE': tag,
         'CIBW_BUILD': compute_cibw_build_pattern(args.py_abis),
@@ -312,8 +318,9 @@ def main() -> int:
 
     pip_cache_mount = '-v concomtorch-pip-cache:/root/.cache/pip'
     if args.skip_tests:
-        # GPU-less local build: no test gate, no GPU passthrough so the
-        # container can be created on a host without the NVIDIA runtime.
+        # GPU-less local build: the container is created from plain docker
+        # create_args and the test gate is skipped, so it runs on a host
+        # with only the base docker engine.
         cibw_env['CIBW_CONTAINER_ENGINE'] = f'docker; create_args: {pip_cache_mount}'
     else:
         # The build, repair, and test steps reuse one container created from

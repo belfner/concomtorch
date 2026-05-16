@@ -394,17 +394,35 @@ def move_new_wheels(source: Path, dest_files: Path) -> list[Path]:
     -------
     list[Path]
         Destination paths of moved wheels.
+
+    Raises
+    ------
+    RuntimeError
+        When any wheel filename does not match the expected
+        ``+cu{N}torch{X.Y.Z}`` local-version pattern, which indicates a
+        setup.py metadata regression. This mirrors the github-pages-mode
+        guard in :func:`release.upload_wheels` so a local-mode publish fails
+        the tick loudly instead of serving a wheel the index would omit.
     """
     if not source.is_dir():
         return []
     dest_files.mkdir(parents=True, exist_ok=True)
+    wheels = sorted(source.glob('*.whl'))
+    unparsable = [w for w in wheels if parse_wheel(w.name) is None]
+    if len(unparsable) > 0:
+        names = ', '.join(w.name for w in unparsable)
+        raise RuntimeError(
+            f"{len(unparsable)} wheel(s) in {source} do not match the expected "
+            f"'+cu{{N}}torch{{X.Y.Z}}' local version pattern, which indicates a "
+            f'setup.py metadata regression: {names}'
+        )
     moved = []
     # Every wheel reaching `source` has already passed the in-container pytest
     # gate: cibuildwheel runs CIBW_TEST_COMMAND_LINUX after auditwheel-repair and
     # before moving the wheel to /output and copying it back to the host, so a
     # failing suite aborts the build before the wheel can land here. Verification
     # is upstream by construction; this mover must not add a second gate.
-    for wheel in source.glob('*.whl'):
+    for wheel in wheels:
         target = dest_files / wheel.name
         shutil.move(str(wheel), str(target))
         moved.append(target)

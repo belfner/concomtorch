@@ -17,8 +17,12 @@ Flow:
        ``https://github.com/<owner>/<repo>/releases/download/<prefix>-<cuda>-torch<minor>/<wheel>``.
     5. Sync the rendered tree into a checkout of the ``gh-pages`` branch and push.
 
-Authentication relies on the ``gh`` CLI being logged in. Git pushes use whichever credential
-helper the build user has configured for the repo (token, SSH key, or gh auth git-credential).
+Authentication: both ``gh`` (release upload) and ``git push`` (Pages) read ``GH_TOKEN``.
+``ci/release.py`` sources ``GH_TOKEN`` from a repo-local ``.env`` (see ``--dotenv``) so a
+per-repo token scopes the run while the global ``gh`` keyring user stays as-is, and feeds
+that token to the Pages push through a transient ``GIT_ASKPASS`` helper so it stays out of
+argv. With ``GH_TOKEN`` unset, ``gh`` uses its logged-in keyring and ``git push`` uses the
+``origin`` remote with whichever credential helper the build user has configured.
 """
 from __future__ import annotations
 
@@ -65,9 +69,8 @@ def load_dotenv(path: Path) -> dict[str, str]:
     account that owns this clone, without globally switching the active ``gh`` keyring user.
 
     The parser handles plain ``KEY=value``, surrounding single/double quotes, an optional
-    ``export`` prefix, comments (lines starting with ``#``), and blank lines. Anything more
-    elaborate (variable interpolation, multi-line values, escapes) is intentionally not
-    supported; if the file is missing this is a no-op.
+    ``export`` prefix, comments (lines starting with ``#``), and blank lines. A missing file
+    yields an empty mapping.
 
     Parameters
     ----------
@@ -122,9 +125,13 @@ def detect_repo_slug() -> tuple[str, str]:
         cwd=REPO_ROOT, check=True, capture_output=True, text=True,
     )
     url = result.stdout.strip()
-    match = GITHUB_REMOTE_RE.search(url)
+    # A credential-bearing HTTPS remote (https://<token>@github.com/owner/repo)
+    # carries a secret in the URL userinfo. Strip it before matching and before
+    # the URL can reach an exception message or the log.
+    safe_url = re.sub(r'(https://)[^/@]*@', r'\1', url)
+    match = GITHUB_REMOTE_RE.search(safe_url)
     if match is None:
-        raise RuntimeError(f'origin remote {url!r} does not look like a GitHub repository')
+        raise RuntimeError(f'origin remote {safe_url!r} does not look like a GitHub repository')
     return match.group('owner'), match.group('name')
 
 
@@ -234,7 +241,7 @@ def upload_wheels(wheelhouse: Path, tag_prefix: str, owner: str, name: str) -> l
     zero-byte asset is the signature of an interrupted prior upload and would be a permanent
     dead link in the index; such assets are re-uploaded with ``--clobber`` to repair them.
 
-    A wheel whose filename does not match the expected ``+cu{N}torch{X.Y}`` local-version
+    A wheel whose filename does not match the expected ``+cu{N}torch{X.Y.Z}`` local-version
     pattern indicates a setup.py metadata regression that would ship a silently-incomplete
     release, so it raises :class:`RuntimeError`.
 
@@ -456,10 +463,10 @@ def deploy_pages(pages_dir: Path, owner: str, name: str, branch: str = 'gh-pages
     """
     Sync ``pages_dir`` into a checkout of the gh-pages branch and push to origin.
 
-    Uses a git worktree under ``.git/concomtorch-gh-pages`` so the host working tree is not
-    disturbed. The branch is created as an orphan if it does not yet exist. The worktree is
-    created and removed inside a single exclusive deploy lock, and removal runs in a
-    ``finally`` so a failed push leaves no leaked worktree state behind.
+    Uses a dedicated git worktree under ``.git/concomtorch-gh-pages`` for the deploy, leaving
+    the host working tree as-is. The branch is created as an orphan on first deploy. The
+    worktree is created and removed inside a single exclusive deploy lock, and removal runs
+    in a ``finally`` so the worktree is always cleaned up, including after a failed push.
 
     Parameters
     ----------
