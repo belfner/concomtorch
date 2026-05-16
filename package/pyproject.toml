@@ -42,6 +42,7 @@ dev = [
 [tool.setuptools]
 packages = ["concomtorch"]
 package-dir = {"" = "src"}
+license-files = ["LICENSE"]
 
 [tool.setuptools.package-data]
 concomtorch = ["*.so", "*.pyd"]

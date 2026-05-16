@@ -78,6 +78,56 @@ sudo systemctl edit concomtorch-wheels.service
 #   Environment=CONCOMTORCH_NTFY_URL=https://ntfy.sh/<your-topic>
 ```
 
+## Publish modes and GitHub auth
+
+`ci/run.py` defaults to `--publish-mode github-pages`. In this mode each tick
+uploads the built wheels as GitHub Release assets and pushes the regenerated
+PEP 503 index to the `gh-pages` branch; GitHub Pages serves that branch as the
+simple index.
+
+### Required: GH_TOKEN via .env
+
+`ci/release.py` sources a personal access token from `/srv/concomtorch/.env`
+(the repo-root `.env`, loaded before any `gh` or `git push` invocation). Create
+it after `uv sync`:
+
+```bash
+sudo -u concomtorch tee /srv/concomtorch/.env >/dev/null <<'EOF'
+GH_TOKEN=ghp_your_token_here
+EOF
+sudo -u concomtorch chmod 600 /srv/concomtorch/.env
+```
+
+`.env` is gitignored; keep it owned by the service user with mode `600`. The
+token is used both for the `gh release` asset upload and for the `gh-pages`
+push (supplied through a transient `GIT_ASKPASS` helper, so it never appears in
+argv or logs).
+
+Token scope:
+
+- Classic PAT: `repo` scope (release asset upload plus `gh-pages` branch push).
+- Fine-grained PAT: repository `Contents: Read and write`, scoped to this repo.
+
+The repo slug is parsed from `git remote get-url origin`, so the clone must
+have an `origin` remote pointing at the GitHub repository. Enable GitHub Pages
+for the repository with the source set to the `gh-pages` branch; the published
+index is then served at `https://<owner>.github.io/<name>/<cuda>/`.
+
+Without a usable token (or pre-configured `gh`/git credentials) the build
+phase still succeeds but the publish step fails the tick and notifies.
+
+### Alternative: local publish mode
+
+To self-host the index without GitHub, run with `--publish-mode local`. Wheels
+are moved into `<serve-root>/files` and per-CUDA PEP 503 indexes are
+regenerated there after each build (see the layout above); point caddy/nginx
+at `<serve-root>`. No `GH_TOKEN` is needed in this mode. Set it in the systemd
+unit, e.g.:
+
+```
+ExecStart=/srv/concomtorch/.venv/bin/python /srv/concomtorch/ci/run.py --publish-mode local
+```
+
 ## Manual operations
 
 ```bash

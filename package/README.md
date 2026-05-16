@@ -10,7 +10,6 @@ GPU-accelerated connected component labeling for PyTorch tensors using the state
 - **Buffer reuse** - Pre-allocate tensors for additional speedup
 - **2D-only optimized** - Focused on single image performance
 - **Support for uint8 and bool tensors**
-- **Extensive testing** - Comprehensive test suite with edge cases
 - **CUDA required** - GPU-only implementation
 
 ## Installation
@@ -23,18 +22,34 @@ GPU-accelerated connected component labeling for PyTorch tensors using the state
 - C++ compiler with C++17 support
 - NVIDIA GPU with compute capability >= 7.0
 
+### Install the published wheel
+
+Wheels are published behind per-CUDA simple indexes. Pick the channel matching
+the CUDA build of your installed PyTorch; the wheel pins `torch==X.Y.*` so pip
+selects the build for your torch minor automatically:
+
+```bash
+pip install concomtorch --extra-index-url https://belfner.github.io/concomtorch/cu126/
+```
+
 ### Install from source
+
+The buildable package lives in `package/`. The repository root is the CI
+orchestration environment and is not the package, so install the subdirectory:
 
 ```bash
 git clone <repository-url>
 cd concomtorch
-pip install -e .
+pip install -e ./package
 ```
 
 ### Build with specific CUDA architectures
 
+`TORCH_CUDA_ARCH_LIST` is a semicolon-separated list of dotted compute
+capabilities:
+
 ```bash
-TORCH_CUDA_ARCH_LIST='8.0 8.6 9.0' pip install -e .
+TORCH_CUDA_ARCH_LIST='8.0;8.6;9.0' pip install -e ./package
 ```
 
 ## Usage
@@ -216,21 +231,17 @@ The BKE algorithm is particularly efficient for:
 
 ## Development
 
-### Running tests
+### Install development dependencies
 
 ```bash
-# Install development dependencies
-pip install -e '.[dev]'
-
-# Run tests (requires CUDA GPU)
-pytest tests/ -v
+pip install -e './package[dev]'
 ```
 
 ### Code formatting
 
 ```bash
-ruff check src/ tests/
-ruff format src/ tests/
+ruff check package/src/
+ruff format package/src/
 ```
 
 ## License
