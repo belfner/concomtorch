@@ -148,6 +148,27 @@ def size_to_bytes(text: str) -> int:
 def dockerfile_text(cuda_variant: str, manylinux_image: str = DEFAULT_MANYLINUX_IMAGE) -> str:
     """
     Render the Dockerfile for one cuda variant.
+
+    The host GCC that nvcc accepts is a property of the installed CUDA toolkit,
+    encoded in ``$CUDA_HOME/include/crt/host_config.h`` as the ``#if __GNUC__ > N``
+    guard. The toolkit is installed first, the cap ``N`` is read from that header,
+    and the highest ``gcc-toolset-K`` (``K`` from the cap down to 9) that the RHEL8
+    repos offer is installed and exposed through a stable
+    ``/opt/rh/gcc-toolset-active`` symlink. A final layer compiles a trivial CUDA
+    translation unit with that toolset so an unusable pairing fails the image build
+    rather than every wheel build.
+
+    Parameters
+    ----------
+    cuda_variant : str
+        CUDA variant tag, e.g. ``cu126``.
+    manylinux_image : str
+        Base manylinux image the Dockerfile derives from.
+
+    Returns
+    -------
+    str
+        The rendered Dockerfile contents.
     """
     cuda_major_minor, cuda_pkg_suffix = cuda_tag_parts(cuda_variant)
     return f"""\
@@ -159,17 +180,28 @@ RUN yum -y install dnf-plugins-core curl git && \\
     yum -y config-manager --add-repo https://developer.download.nvidia.com/compute/cuda/repos/rhel8/x86_64/cuda-rhel8.repo && \\
     yum -y clean all && rm -rf /var/cache/yum
 
-RUN yum -y install gcc-toolset-12-gcc gcc-toolset-12-gcc-c++ gcc-toolset-12-binutils && \\
-    yum -y clean all && rm -rf /var/cache/yum
-
 RUN yum -y install cuda-toolkit-{cuda_pkg_suffix} && \\
     yum -y clean all && rm -rf /var/cache/yum
 
 ENV CUDA_HOME=/usr/local/cuda-{cuda_major_minor}
 ENV PATH=$CUDA_HOME/bin:$PATH
 
-ENV PATH=/opt/rh/gcc-toolset-12/root/usr/bin:$PATH
-ENV LD_LIBRARY_PATH=/opt/rh/gcc-toolset-12/root/usr/lib64:/opt/rh/gcc-toolset-12/root/usr/lib:$LD_LIBRARY_PATH
+RUN cap="$(grep -oP '__GNUC__ > \\K[0-9]+' "$CUDA_HOME/include/crt/host_config.h" | head -n1)" && \\
+    if [ -z "$cap" ]; then echo "could not read GCC cap from host_config.h" >&2; exit 1; fi && \\
+    chosen="" && \\
+    for n in $(seq "$cap" -1 9); do \\
+        if yum -y install "gcc-toolset-$n-gcc" "gcc-toolset-$n-gcc-c++" "gcc-toolset-$n-binutils"; then chosen="$n"; break; fi; \\
+    done && \\
+    if [ -z "$chosen" ]; then echo "no gcc-toolset at or below GCC $cap is available" >&2; exit 1; fi && \\
+    ln -s "/opt/rh/gcc-toolset-$chosen" /opt/rh/gcc-toolset-active && \\
+    yum -y clean all && rm -rf /var/cache/yum
+
+ENV PATH=/opt/rh/gcc-toolset-active/root/usr/bin:$PATH
+ENV LD_LIBRARY_PATH=/opt/rh/gcc-toolset-active/root/usr/lib64:/opt/rh/gcc-toolset-active/root/usr/lib:$LD_LIBRARY_PATH
+
+RUN printf '__global__ void smoke_kernel() {{}}\\n' > /tmp/smoke.cu && \\
+    nvcc -ccbin "$(command -v gcc)" -c -o /tmp/smoke.o /tmp/smoke.cu && \\
+    rm -f /tmp/smoke.o /tmp/smoke.cu
 """
 
 
