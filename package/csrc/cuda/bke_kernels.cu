@@ -460,6 +460,7 @@ __global__ void component_stats_kernel(
     const int32_t* __restrict__ dense_labels,
     const int64_t height,
     const int64_t width,
+    const int64_t num_components,
     int64_t* __restrict__ area,
     int64_t* __restrict__ sum_row,
     int64_t* __restrict__ sum_col,
@@ -474,7 +475,10 @@ __global__ void component_stats_kernel(
          idx < num_pixels;
          idx += stride) {
         const int32_t comp = dense_labels[idx];
-        if (comp < 0) continue;  // defensive; dense ids are >= 0
+        // Bounds guard: dense ids must be in [0, num_components). This op is
+        // dispatcher-registered and directly callable, so reject raw/stale
+        // labels rather than corrupt memory via out-of-range atomics.
+        if (comp < 0 || static_cast<int64_t>(comp) >= num_components) continue;
         const int32_t row = static_cast<int32_t>(idx / width);
         const int32_t col = static_cast<int32_t>(idx % width);
         atomicAdd(reinterpret_cast<unsigned long long*>(&area[comp]), 1ULL);
@@ -825,7 +829,7 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> component_stats_cuda(
         }
         component_stats_kernel<<<num_blocks, threads_per_block, 0, stream>>>(
             labels_cont.data_ptr<int32_t>(),
-            height, width,
+            height, width, num_components,
             area.data_ptr<int64_t>(),
             sum_row.data_ptr<int64_t>(),
             sum_col.data_ptr<int64_t>(),
