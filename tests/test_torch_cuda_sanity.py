@@ -9,21 +9,26 @@ from __future__ import annotations
 import os
 
 import pytest
+from packaging.version import Version
 
 torch = pytest.importorskip("torch")
 
 
 def test_torch_version_matches_expected() -> None:
     """
-    Assert the installed torch base version matches CONCOMTORCH_EXPECTED_TORCH.
+    Assert the installed torch shares the expected ``X.Y`` minor.
+
+    The wheel pins ``torch==X.Y.*``, so any patch of the built minor is a
+    valid install. CONCOMTORCH_EXPECTED_TORCH carries the build-time
+    version; its ``(major, minor)`` must equal the installed torch's.
     """
     expected = os.environ.get("CONCOMTORCH_EXPECTED_TORCH")
     if expected is None:
         pytest.skip("CONCOMTORCH_EXPECTED_TORCH not set (local run)")
-    installed_base = torch.__version__.split("+")[0]
-    expected_base = expected.split("+")[0]
-    assert installed_base.startswith(expected_base) or expected_base.startswith(installed_base), (
-        f"torch {torch.__version__} does not match expected {expected}"
+    installed_minor = Version(torch.__version__.split("+")[0]).release[:2]
+    expected_minor = Version(expected.split("+")[0]).release[:2]
+    assert installed_minor == expected_minor, (
+        f"torch {torch.__version__} does not match expected minor from {expected}"
     )
 
 

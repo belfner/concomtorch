@@ -54,10 +54,13 @@ def resolve_cuda_arch_list() -> str:
     """
     Resolve the dotted TORCH_CUDA_ARCH_LIST for this build.
 
-    An explicit ``TORCH_CUDA_ARCH_LIST`` in the environment is honored verbatim. Otherwise
-    the list is derived from the toolchain via :func:`nvcc_supported_caps`, filtered to
-    capabilities at or above ``CONCOMTORCH_COMPUTE_MIN`` (default ``7.5``) and sorted
-    ascending, so the targeted arches always track the CUDA toolkit actually present.
+    An explicit ``TORCH_CUDA_ARCH_LIST`` in the environment is used as the arch list as-is;
+    :func:`gencode_args` then tokenizes it as semicolon-separated dotted capabilities
+    (e.g. ``'7.5;8.0'``). Otherwise the list is derived from the toolchain via
+    :func:`nvcc_supported_caps`, filtered to capabilities at or above
+    ``CONCOMTORCH_COMPUTE_MIN`` (a bare major like ``'8'`` or a dotted ``'7.5'``, default
+    ``'7.5'``) and sorted ascending, so the targeted arches track the CUDA toolkit
+    actually present.
 
     Returns
     -------
@@ -71,7 +74,14 @@ def resolve_cuda_arch_list() -> str:
 
     floor_str = os.environ.get('CONCOMTORCH_COMPUTE_MIN', '7.5').strip()
     parts = floor_str.split('.')
-    floor = (int(parts[0]), int(parts[1]))
+    # A bare major (e.g. "8") denotes the .0 capability (sm_80); a dotted
+    # value (e.g. "7.5") carries its own minor.
+    try:
+        floor = (int(parts[0]), int(parts[1]) if len(parts) > 1 else 0)
+    except ValueError as exc:
+        raise RuntimeError(
+            f"CONCOMTORCH_COMPUTE_MIN must look like 'X' or 'X.Y', got {floor_str!r}"
+        ) from exc
 
     caps = [cc for cc in nvcc_supported_caps() if cc >= floor]
     return ';'.join(f'{maj}.{minor}' for maj, minor in caps)
@@ -152,7 +162,8 @@ def make_cuda_extension():
     Build the CUDAExtension descriptor.
 
     Imports torch.utils.cpp_extension lazily so the host environment can install or sync
-    package metadata without CUDA_HOME present. When CUDA is absent and this is a local
+    package metadata without a CUDA toolkit present. CUDA presence is decided by
+    :func:`find_nvcc` (an nvcc compiler is required to build the op). When CUDA is absent and this is a local
     source build, return an empty extension list so editable installs succeed for Python
     tooling. When CUDA is absent on the CI wheel-build path (signaled by CONCOMTORCH_CUDA /
     CONCOMTORCH_TORCH being set), raise so a distributable wheel without the compiled op is
@@ -163,7 +174,7 @@ def make_cuda_extension():
     SystemExit
         When CUDA is unavailable during a CI wheel build.
     """
-    cuda_present = os.environ.get('CUDA_HOME') is not None or os.path.exists('/usr/local/cuda')
+    cuda_present = find_nvcc() is not None
     if not cuda_present:
         is_ci_wheel_build = (
             os.environ.get('CONCOMTORCH_CUDA', '').strip() != ''
@@ -174,7 +185,7 @@ def make_cuda_extension():
                 'setup.py: CONCOMTORCH_CUDA/CONCOMTORCH_TORCH are set (CI wheel build) but no '
                 'CUDA toolkit was found. Refusing to build a wheel without the compiled op.'
             )
-        print('setup.py: CUDA_HOME not set; skipping CUDAExtension. Wheel will not contain the compiled op.')
+        print('setup.py: no nvcc found; skipping CUDAExtension. Wheel will not contain the compiled op.')
         return []
 
     from torch.utils.cpp_extension import CUDAExtension

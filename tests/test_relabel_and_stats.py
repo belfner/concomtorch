@@ -85,7 +85,7 @@ def test_relabel_dense_invariant(cuda_device) -> None:
     cuda_device : torch.device
         CUDA device fixture.
     """
-    image = _ccl_lib.random_image((48, 53), 0.25, "blobs", seed=7)
+    image = _ccl_lib.random_image((48, 53), 0.25, "dilated", seed=7)
     labels = _label_on_gpu(image)
     dense = concomtorch.relabel_components(labels)
 
@@ -96,7 +96,8 @@ def test_relabel_dense_invariant(cuda_device) -> None:
     labels_np = labels.cpu().numpy()
 
     uniq = np.unique(dense_np)
-    n = int(labels_np[labels_np != 0].size and np.unique(labels_np[labels_np != 0]).size)
+    nonzero = labels_np[labels_np != 0]
+    n = int(np.unique(nonzero).size) if nonzero.size > 0 else 0
     np.testing.assert_array_equal(uniq, np.arange(n + 1))
 
     # Background stays background and only background maps to 0.
@@ -165,7 +166,7 @@ def test_component_stats_matches_numpy(cuda_device) -> None:
     cuda_device : torch.device
         CUDA device fixture.
     """
-    image = _ccl_lib.random_image((57, 49), 0.22, "blobs", seed=19)
+    image = _ccl_lib.random_image((57, 49), 0.22, "dilated", seed=19)
     labels = _label_on_gpu(image)
     labels_np = labels.cpu().numpy()
     expected = _expected_stats(labels_np)

@@ -2,8 +2,8 @@
 Minimal end-to-end smoke check: label a tiny image on the GPU through the
 installed wheel. Scope is loadability and dispatch only: it proves the
 compiled CUDA extension loads and the public entry point returns a result
-honoring the output contract. The exhaustive correctness suite is deferred
-and tracked separately in test_correctness.py.
+honoring the output contract. The exhaustive correctness suite lives in
+test_correctness_fixed.py and test_correctness_oracle.py.
 """
 
 from __future__ import annotations
